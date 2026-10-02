@@ -8,6 +8,7 @@ dependencies:
   - pandas
   - scikit-learn
   - xgboost
+  - optuna
   # notebooks
   - jupyter
   - ipykernel

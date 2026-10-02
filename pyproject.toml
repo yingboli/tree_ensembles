@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "My default XGBoost implementation for R&D and learning."
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["numpy", "pandas", "scikit-learn", "xgboost"]
+dependencies = ["numpy", "pandas", "scikit-learn", "xgboost", "optuna"]
 
 [tool.ruff]
 line-length = 100
