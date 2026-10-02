@@ -9,7 +9,7 @@ from sklearn.datasets import load_breast_cancer
 from sklearn.metrics import r2_score, roc_auc_score
 from sklearn.model_selection import cross_val_score, train_test_split
 
-from xgb_trees import XGBDefaultClassifier, XGBDefaultRegressor
+from tree_ensembles.xgb import XGBDefaultClassifier, XGBDefaultRegressor
 
 
 @pytest.fixture

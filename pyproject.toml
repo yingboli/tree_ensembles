@@ -3,9 +3,9 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "xgb_trees"
-version = "0.1.0"
-description = "My default XGBoost implementation for R&D and learning."
+name = "tree_ensembles"
+version = "0.2.0"
+description = "Tree ensembles (XGBoost, BART) for R&D and learning."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = ["numpy", "pandas", "scikit-learn", "xgboost", "optuna"]

@@ -1,4 +1,4 @@
-name: xgb_trees
+name: tree_ensembles
 channels:
   - conda-forge
 dependencies:

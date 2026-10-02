@@ -27,8 +27,8 @@ from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
 from sklearn.metrics import log_loss, root_mean_squared_error
 from sklearn.model_selection import train_test_split
 
-from xgb_trees.callbacks import StopOnEmptyTree
-from xgb_trees.defaults import default_max_bin, estimate_phi, ic_gamma
+from tree_ensembles.xgb.callbacks import StopOnEmptyTree
+from tree_ensembles.xgb.defaults import default_max_bin, estimate_phi, ic_gamma
 
 ArrayLike = pd.DataFrame | np.ndarray
 

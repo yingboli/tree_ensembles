@@ -1,6 +1,7 @@
-# xgb_trees
+# tree_ensembles
 
-My default XGBoost implementation, for R&D and learning.
+Tree ensembles for my R&D and learning: my default XGBoost setup (`tree_ensembles.xgb`),
+with BART to come.
 
 ## Install from GitHub
 
@@ -12,28 +13,28 @@ login, or asks for your username and a
 [personal access token](https://github.com/settings/tokens) (not your password):
 
 ```bash
-pip install "git+https://github.com/yingboli/xgb_trees.git"
+pip install "git+https://github.com/yingboli/tree_ensembles.git"
 ```
 
 Don't put the token in the URL; it would be saved in shell history or notebooks.
 With an SSH key added to GitHub, this also works:
 
 ```bash
-pip install "git+ssh://git@github.com/yingboli/xgb_trees.git"
+pip install "git+ssh://git@github.com/yingboli/tree_ensembles.git"
 ```
 
-Pin a commit (or a tag, once created with `git tag v0.1.0 && git push origin v0.1.0`)
-so later changes here don't break that project:
+Pin a release tag (see [CHANGELOG.md](CHANGELOG.md)) or a commit, so later changes here
+don't break that project:
 
 ```bash
-pip install "git+https://github.com/yingboli/xgb_trees.git@a2730b0"
+pip install "git+https://github.com/yingboli/tree_ensembles.git@v0.2.0"
 ```
 
 ## Development setup
 
 ```bash
 make env                 # create the conda env from environment.yml (installs this repo editable)
-conda activate xgb_trees
+conda activate tree_ensembles
 pre-commit install       # run ruff on every commit
 ```
 
@@ -44,7 +45,7 @@ from sklearn.datasets import load_breast_cancer
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import train_test_split
 
-from xgb_trees import XGBDefaultClassifier
+from tree_ensembles.xgb import XGBDefaultClassifier
 
 X, y = load_breast_cancer(return_X_y=True, as_frame=True)
 X_train, X_test, y_train, y_test = train_test_split(X, y, random_state=0, stratify=y)
@@ -76,7 +77,7 @@ print(clf.params_)  # every parameter actually used
 ```python
 from sklearn.datasets import load_diabetes
 
-from xgb_trees import XGBDefaultRegressor
+from tree_ensembles.xgb import XGBDefaultRegressor
 
 X, y = load_diabetes(return_X_y=True, as_frame=True)
 
@@ -105,7 +106,7 @@ Optuna study, so a saved model does not depend on the installed Optuna version.
 import numpy as np
 from sklearn.datasets import load_diabetes
 
-from xgb_trees import XGBDefaultRegressor
+from tree_ensembles.xgb import XGBDefaultRegressor
 
 X, y = load_diabetes(return_X_y=True, as_frame=True)
 weights = np.where(X["sex"] > 0, 2.0, 1.0)  # frequency weights
@@ -137,10 +138,14 @@ make check       # ruff + mypy + pytest
 ## Layout
 
 ```
-src/xgb_trees/
-  estimators.py  XGBDefaultClassifier, XGBDefaultRegressor
-  defaults.py    gamma, max_bin and phi helpers
-  callbacks.py   StopOnEmptyTree
-tests/           pytest tests
-notebooks/       exploratory notebooks
+src/tree_ensembles/
+  xgb/               XGBoost (from tree_ensembles.xgb import ...)
+    estimators.py    XGBDefaultClassifier, XGBDefaultRegressor
+    defaults.py      gamma, max_bin and phi helpers
+    callbacks.py     StopOnEmptyTree
+  bart/              BART (to come)
+tests/
+  xgb/               pytest tests for tree_ensembles.xgb
+notebooks/           exploratory notebooks
+CHANGELOG.md         what changed in each version
 ```

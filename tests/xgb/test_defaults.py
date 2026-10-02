@@ -3,7 +3,7 @@ import math
 import numpy as np
 import pytest
 
-from xgb_trees.defaults import default_max_bin, estimate_phi, ic_gamma
+from tree_ensembles.xgb.defaults import default_max_bin, estimate_phi, ic_gamma
 
 
 def test_ic_gamma() -> None:

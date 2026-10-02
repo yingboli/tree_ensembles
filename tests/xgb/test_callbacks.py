@@ -1,7 +1,7 @@
 import numpy as np
 import xgboost as xgb
 
-from xgb_trees import StopOnEmptyTree
+from tree_ensembles.xgb import StopOnEmptyTree
 
 
 def _fit(gamma: float) -> int:
