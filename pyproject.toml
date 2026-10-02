@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xgb_trees"
+version = "0.1.0"
+description = "My default XGBoost implementation for R&D and learning."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["numpy", "pandas", "scikit-learn", "xgboost"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# E/F: pycodestyle + pyflakes, I: import sorting, UP: modern syntax, B: common bugs
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src", "tests"]
+disallow_untyped_defs = true
+ignore_missing_imports = true  # sklearn has no type stubs
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

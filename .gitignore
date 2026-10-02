@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.egg-info/
+build/
+dist/
+
+# Tool caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Data and OS files
+data/
+.DS_Store

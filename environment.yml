@@ -1,0 +1,22 @@
+name: xgb_trees
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  # core
+  - numpy
+  - pandas
+  - scikit-learn
+  - xgboost
+  # notebooks
+  - jupyter
+  - ipykernel
+  # dev tools
+  - ruff
+  - mypy
+  - pandas-stubs
+  - pytest
+  - pre-commit
+  - pip
+  - pip:
+      - -e .
