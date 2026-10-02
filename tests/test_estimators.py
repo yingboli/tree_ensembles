@@ -103,9 +103,9 @@ def test_tuning_on_user_validation_data(
     seen: dict[str, int] = {}
     original_tune = XGBDefaultRegressor._tune
 
-    def spy_tune(self: Any, X_tr: Any, y_tr: Any, X_va: Any, y_va: Any, params: Any) -> Any:
-        seen["n_train"], seen["n_valid"] = len(y_tr), len(y_va)
-        return original_tune(self, X_tr, y_tr, X_va, y_va, params)
+    def spy_tune(self: Any, fit_data: Any, valid: Any, params: Any) -> Any:
+        seen["n_train"], seen["n_valid"] = len(fit_data.y), len(valid.y)
+        return original_tune(self, fit_data, valid, params)
 
     monkeypatch.setattr(XGBDefaultRegressor, "_tune", spy_tune)
     reg = XGBDefaultRegressor(learning_rate="optuna", max_depth="optuna", n_optuna_trials=3)
@@ -129,7 +129,7 @@ def test_validation_data_checks(binary_data: tuple) -> None:
     with pytest.raises(ValueError, match="not in y"):
         tuned.fit(X_train, y_train, X_valid=X_test, y_valid=y_test + 5)
     with pytest.warns(UserWarning, match="ignored"):
-        XGBDefaultClassifier(n_estimators=5).fit(X_train, y_train, X_test, y_test)
+        XGBDefaultClassifier(n_estimators=5).fit(X_train, y_train, X_valid=X_test, y_valid=y_test)
 
 
 def test_string_labels_in_validation_data() -> None:
@@ -162,3 +162,132 @@ def test_sklearn_compatible(binary_data: tuple) -> None:
     assert clf.get_params()["xgb_params"] == {"subsample": 0.9}
     scores = cross_val_score(clf, X_train, y_train, cv=3)
     assert scores.mean() > 0.9
+
+
+# --- sample weights -------------------------------------------------------------
+
+
+def test_unit_weights_match_no_weights(regression_data: tuple) -> None:
+    X, y = regression_data
+    plain = XGBDefaultRegressor().fit(X, y)
+    weighted = XGBDefaultRegressor().fit(X, y, sample_weight=np.ones(len(y)))
+    assert weighted.gamma_ == pytest.approx(plain.gamma_)
+    np.testing.assert_allclose(weighted.predict(X), plain.predict(X), rtol=1e-6)
+
+
+def test_weight_two_matches_duplicated_rows(regression_data: tuple) -> None:
+    """Frequency weights: weight 2 means the row appears twice, so n = sum of weights.
+
+    Floating-point details differ between the two, so the fitted trees are close but
+    not identical; phi is fixed so gamma can be compared exactly.
+    """
+    X, y = regression_data
+    doubled = XGBDefaultRegressor(phi=1.0).fit(pd.concat([X, X]), np.concatenate([y, y]))
+    weighted = XGBDefaultRegressor(phi=1.0).fit(X, y, sample_weight=np.full(len(y), 2.0))
+
+    assert weighted.gamma_ == pytest.approx(3 * math.log(math.log(2 * len(y))))
+    assert weighted.gamma_ == pytest.approx(doubled.gamma_)
+    assert weighted.params_["base_score"] == pytest.approx(doubled.params_["base_score"])
+    assert np.corrcoef(weighted.predict(X), doubled.predict(X))[0, 1] > 0.99
+
+
+def test_too_small_weight_sum_raises(regression_data: tuple) -> None:
+    X, y = regression_data
+    w = np.full(len(y), 1 / len(y))  # weights normalized to sum 1: not frequency weights
+    with pytest.raises(ValueError, match="sum of the weights"):
+        XGBDefaultRegressor().fit(X, y, sample_weight=w)
+
+
+def test_cross_val_score_with_weights(binary_data: tuple) -> None:
+    X_train, _, y_train, _ = binary_data
+    w = np.where(y_train == 1, 1.0, 2.0)
+    scores = cross_val_score(
+        XGBDefaultClassifier(), X_train, y_train, cv=3, params={"sample_weight": w}
+    )
+    assert scores.mean() > 0.9
+
+
+# --- offset (base_margin) -------------------------------------------------------
+
+
+@pytest.fixture
+def offset_data() -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
+    """y = offset + 3 + signal + noise: the +3 shift is not in the offset."""
+    rng = np.random.default_rng(1)
+    n = 3000
+    X = pd.DataFrame(rng.normal(size=(n, 3)), columns=["a", "b", "c"])
+    offset = rng.normal(size=n)
+    y = offset + 3 + 2 * X["a"].to_numpy() + rng.normal(size=n)
+    return X, y, offset
+
+
+def test_regressor_with_offset(offset_data: tuple) -> None:
+    X, y, offset = offset_data
+    reg = XGBDefaultRegressor().fit(X, y, base_margin=offset)
+    pred = reg.predict(X, base_margin=offset)
+
+    assert reg.params_["base_score"] == 0.0  # so no offset in predict means offset 0
+    assert np.mean(pred) == pytest.approx(np.mean(y), abs=0.02)  # the +3 shift is learned
+    assert r2_score(y, pred) > 0.75
+    np.testing.assert_allclose(reg.predict(X), reg.predict(X, base_margin=np.zeros(len(y))))
+
+
+def test_offset_shift_learned_even_when_first_tree_is_empty(offset_data: tuple) -> None:
+    X, y, offset = offset_data
+    y_no_signal = y - 2 * X["a"].to_numpy()  # only offset + 3 + noise: no split is worth it
+    reg = XGBDefaultRegressor().fit(X, y_no_signal, base_margin=offset)
+    pred = reg.predict(X, base_margin=offset)
+
+    assert reg.n_trees_ > 1
+    # The learned shift is the sample mean of y - offset (about 3, plus noise).
+    assert np.mean(pred - offset) == pytest.approx(np.mean(y_no_signal - offset), abs=0.01)
+
+
+def test_classifier_with_offset() -> None:
+    rng = np.random.default_rng(2)
+    n = 4000
+    X = pd.DataFrame(rng.normal(size=(n, 2)), columns=["a", "b"])
+    offset = rng.normal(size=n)
+    margin = offset - 1.5 + X["a"].to_numpy()
+    y = (rng.random(n) < 1 / (1 + np.exp(-margin))).astype(int)
+
+    clf = XGBDefaultClassifier().fit(X, y, base_margin=offset)
+    proba = clf.predict_proba(X, base_margin=offset)[:, 1]
+
+    assert clf.params_["base_score"] == 0.0
+    assert np.mean(proba) == pytest.approx(np.mean(y), abs=0.01)
+    assert roc_auc_score(y, proba) > 0.7
+
+
+def test_base_score_with_offset_warns(offset_data: tuple) -> None:
+    X, y, offset = offset_data
+    with pytest.warns(UserWarning, match="base_score is ignored"):
+        XGBDefaultRegressor(base_score=3.0, n_estimators=5).fit(X, y, base_margin=offset)
+
+
+def test_offset_needs_validation_offset(offset_data: tuple) -> None:
+    X, y, offset = offset_data
+    tuned = XGBDefaultRegressor(max_depth="optuna", n_optuna_trials=2)
+    with pytest.raises(ValueError, match="base_margin_valid"):
+        tuned.fit(X[:2000], y[:2000], base_margin=offset[:2000], X_valid=X[2000:], y_valid=y[2000:])
+
+
+def test_tuning_with_weights_and_offset(offset_data: tuple) -> None:
+    X, y, offset = offset_data
+    w = np.random.default_rng(3).integers(1, 4, size=len(y)).astype(float)
+    reg = XGBDefaultRegressor(learning_rate="optuna", n_optuna_trials=2)
+
+    reg.fit(X, y, sample_weight=w, base_margin=offset)  # internal holdout
+    assert reg.optuna_best_params_ is not None
+
+    reg.fit(
+        X[:2000],
+        y[:2000],
+        sample_weight=w[:2000],
+        base_margin=offset[:2000],
+        X_valid=X[2000:],
+        y_valid=y[2000:],
+        sample_weight_valid=w[2000:],
+        base_margin_valid=offset[2000:],
+    )
+    assert reg.optuna_best_params_ is not None

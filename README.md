@@ -61,8 +61,8 @@ print(clf.params_)  # every parameter actually used
 
 | Parameter | Default | Override with |
 |---|---|---|
-| `base_score` | mean(y_train) | `base_score=0.3` |
-| `n_estimators` | 2000, stop at the first tree with no split | `n_estimators=500`, `stop_on_empty_tree=False` |
+| `base_score` | weighted mean(y_train); 0 with an offset | `base_score=0.3` |
+| `n_estimators` | 2000, stop at the first tree with no split (and a tiny leaf) | `n_estimators=500`, `stop_on_empty_tree=False` |
 | `gamma` | HQ: 3·ln(ln n)·phi | `criterion="aic"` (2·phi), `"bic"` (ln n·phi), or `gamma=1.0` |
 | `phi` | 1 (classifier); residual variance of an under-fitted model (regressor) | `phi=2.0` |
 | `learning_rate` | 0.1 | a number, or `"optuna"` to tune in [0.05, 0.3] |
@@ -98,6 +98,31 @@ print(reg.optuna_best_params_)
 
 Only the best values are kept (`optuna_best_params_`, also merged into `params_`), not the
 Optuna study, so a saved model does not depend on the installed Optuna version.
+
+### Sample weights and offsets
+
+```python
+import numpy as np
+from sklearn.datasets import load_diabetes
+
+from xgb_trees import XGBDefaultRegressor
+
+X, y = load_diabetes(return_X_y=True, as_frame=True)
+weights = np.where(X["sex"] > 0, 2.0, 1.0)  # frequency weights
+offset = np.full(len(y), 150.0)  # offset on the margin scale
+
+reg = XGBDefaultRegressor().fit(X, y, sample_weight=weights, base_margin=offset)
+pred = reg.predict(X, base_margin=offset)  # pass the offset again
+```
+
+- `sample_weight` are **frequency weights**: weight 2 means the row counts twice, so the
+  information criterion uses n = sum of weights. Weights that sum to less than e raise an error.
+- `base_margin` is an offset on the margin scale (log-odds for the classifier), passed to
+  XGBoost as given; there is no separate intercept. `predict` without an offset uses 0.
+- Boosting only stops at an empty tree once its leaf is tiny, so an overall shift not
+  covered by the offset is still learned.
+- For tuning with your own validation set, also pass `sample_weight_valid` /
+  `base_margin_valid` (the latter is required when an offset is used).
 
 Both classes are scikit-learn estimators, so `clone`, `Pipeline`, `cross_val_score`
 and `GridSearchCV` work as usual.
