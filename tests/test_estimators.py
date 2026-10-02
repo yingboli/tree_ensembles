@@ -1,4 +1,5 @@
 import math
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -90,6 +91,54 @@ def test_optuna_tuning(binary_data: tuple) -> None:
 def test_no_tuning_leaves_optuna_best_params_empty(regression_data: tuple) -> None:
     X, y = regression_data
     assert XGBDefaultRegressor(n_estimators=5).fit(X, y).optuna_best_params_ is None
+
+
+def test_tuning_on_user_validation_data(
+    regression_data: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    X, y = regression_data
+    X_train, X_val, y_train, y_val = X[:1500], X[1500:], y[:1500], y[1500:]
+
+    # Record which data each Optuna run trains and scores on.
+    seen: dict[str, int] = {}
+    original_tune = XGBDefaultRegressor._tune
+
+    def spy_tune(self: Any, X_tr: Any, y_tr: Any, X_va: Any, y_va: Any, params: Any) -> Any:
+        seen["n_train"], seen["n_valid"] = len(y_tr), len(y_va)
+        return original_tune(self, X_tr, y_tr, X_va, y_va, params)
+
+    monkeypatch.setattr(XGBDefaultRegressor, "_tune", spy_tune)
+    reg = XGBDefaultRegressor(learning_rate="optuna", max_depth="optuna", n_optuna_trials=3)
+    reg.fit(X_train, y_train, X_valid=X_val, y_valid=y_val)
+
+    assert seen == {"n_train": 1500, "n_valid": 500}
+    # The final model is trained on X_train only: same as fitting with the tuned values.
+    assert reg.params_["base_score"] == pytest.approx(y_train.mean())
+    best = reg.optuna_best_params_
+    assert best is not None
+    same = XGBDefaultRegressor(**best).fit(X_train, y_train)
+    np.testing.assert_allclose(reg.predict(X_val), same.predict(X_val))
+
+
+def test_validation_data_checks(binary_data: tuple) -> None:
+    X_train, X_test, y_train, y_test = binary_data
+    tuned = XGBDefaultClassifier(max_depth="optuna", n_optuna_trials=2)
+
+    with pytest.raises(ValueError, match="both"):
+        tuned.fit(X_train, y_train, X_valid=X_test)
+    with pytest.raises(ValueError, match="not in y"):
+        tuned.fit(X_train, y_train, X_valid=X_test, y_valid=y_test + 5)
+    with pytest.warns(UserWarning, match="ignored"):
+        XGBDefaultClassifier(n_estimators=5).fit(X_train, y_train, X_test, y_test)
+
+
+def test_string_labels_in_validation_data() -> None:
+    rng = np.random.default_rng(0)
+    X = pd.DataFrame({"x": rng.normal(size=400)})
+    y = np.where(X["x"] + rng.normal(size=400) > 0, "yes", "no")
+    clf = XGBDefaultClassifier(max_depth="optuna", n_optuna_trials=2)
+    clf.fit(X[:300], y[:300], X_valid=X[300:], y_valid=y[300:])
+    assert clf.optuna_best_params_ is not None
 
 
 def test_categorical_feature_and_string_labels() -> None:

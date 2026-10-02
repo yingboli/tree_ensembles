@@ -2,10 +2,37 @@
 
 My default XGBoost implementation, for R&D and learning.
 
-## Setup
+## Install from GitHub
+
+To use the package in another project or on another machine (Python >= 3.12).
+pip also installs numpy, pandas, scikit-learn, xgboost and optuna.
+
+This repo is private, so pip needs GitHub access. Over HTTPS, git uses your saved GitHub
+login, or asks for your username and a
+[personal access token](https://github.com/settings/tokens) (not your password):
 
 ```bash
-make env                 # create the conda env from environment.yml
+pip install "git+https://github.com/yingboli/xgb_trees.git"
+```
+
+Don't put the token in the URL; it would be saved in shell history or notebooks.
+With an SSH key added to GitHub, this also works:
+
+```bash
+pip install "git+ssh://git@github.com/yingboli/xgb_trees.git"
+```
+
+Pin a commit (or a tag, once created with `git tag v0.1.0 && git push origin v0.1.0`)
+so later changes here don't break that project:
+
+```bash
+pip install "git+https://github.com/yingboli/xgb_trees.git@a2730b0"
+```
+
+## Development setup
+
+```bash
+make env                 # create the conda env from environment.yml (installs this repo editable)
 conda activate xgb_trees
 pre-commit install       # run ruff on every commit
 ```
@@ -60,6 +87,13 @@ reg = XGBDefaultRegressor(
 ).fit(X, y)
 print(reg.optuna_best_params_)  # {'learning_rate': 0.0536, 'max_depth': 6}
 print(reg.phi_, reg.gamma_, reg.n_trees_)
+
+# Or score the trials on your own validation set (e.g. the most recent period,
+# or held-out groups). The final model is then trained on X_train only.
+X_train, X_val, y_train, y_val = X[:350], X[350:], y[:350], y[350:]
+reg = XGBDefaultRegressor(learning_rate="optuna", max_depth="optuna")
+reg.fit(X_train, y_train, X_valid=X_val, y_valid=y_val)
+print(reg.optuna_best_params_)
 ```
 
 Only the best values are kept (`optuna_best_params_`, also merged into `params_`), not the

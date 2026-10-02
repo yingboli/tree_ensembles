@@ -7,10 +7,13 @@ Defaults (each one can be overridden by passing your own value):
     phi          = 1 for binary:logistic, residual variance from an under-fitted model otherwise
     eta          = 0.1, or "optuna" to tune it in [0.05, 0.3]
     max_depth    = 6, or "optuna" to tune it in {3, 4, 5, 6}
+                   (tuning scores on fit(..., X_valid=, y_valid=) if given,
+                   otherwise on a random holdout of size valid_size)
     tree_method  = "hist", max_bin = max(256, (2n)^(1/3)), enable_categorical = True
 Any other XGBoost parameter goes in `xgb_params`.
 """
 
+import warnings
 from typing import Any, Literal
 
 import numpy as np
@@ -85,6 +88,9 @@ class _XGBDefaultBase(BaseEstimator):
     def _prepare_y(self, y: Any) -> np.ndarray:
         raise NotImplementedError
 
+    def _prepare_y_valid(self, y: Any) -> np.ndarray:
+        raise NotImplementedError
+
     def _default_phi(self, X: ArrayLike, y: np.ndarray) -> float:
         raise NotImplementedError
 
@@ -96,8 +102,17 @@ class _XGBDefaultBase(BaseEstimator):
 
     # --- fitting -------------------------------------------------------------
 
-    def fit(self, X: ArrayLike, y: Any) -> "_XGBDefaultBase":
+    def fit(
+        self,
+        X: ArrayLike,
+        y: Any,
+        X_valid: ArrayLike | None = None,
+        y_valid: Any = None,
+    ) -> "_XGBDefaultBase":
+        """Fit on (X, y). Optional (X_valid, y_valid) is used only to score Optuna trials."""
         y = self._prepare_y(y)
+        if (X_valid is None) != (y_valid is None):
+            raise ValueError("Pass both X_valid and y_valid, or neither")
         n = len(y)
 
         extra = dict(self.xgb_params or {})
@@ -128,23 +143,40 @@ class _XGBDefaultBase(BaseEstimator):
         # does not depend on the installed Optuna version.
         self.optuna_best_params_: dict[str, Any] | None = None
         if "optuna" in (self.learning_rate, self.max_depth):
-            self.optuna_best_params_ = self._tune(X, y, params)
+            if X_valid is None:
+                X_tr, X_va, y_tr, y_va = train_test_split(
+                    X,
+                    y,
+                    test_size=self.valid_size,
+                    random_state=self.random_state,
+                    stratify=y if self._stratify else None,
+                )
+            else:
+                X_tr, X_va, y_tr, y_va = X, X_valid, y, self._prepare_y_valid(y_valid)
+            self.optuna_best_params_ = self._tune(X_tr, y_tr, X_va, y_va, params)
             params.update(self.optuna_best_params_)
+        elif X_valid is not None:
+            warnings.warn(
+                "X_valid/y_valid are only used for Optuna tuning and nothing is set to "
+                '"optuna"; they are ignored.',
+                stacklevel=2,
+            )
 
+        # The final model is always trained on (X, y) only.
         self.params_ = params
         self.model_ = self._new_model(params).fit(X, y)
         self.n_trees_ = self.model_.get_booster().num_boosted_rounds()
         return self
 
-    def _tune(self, X: ArrayLike, y: np.ndarray, params: dict[str, Any]) -> dict[str, Any]:
-        """Tune learning_rate and/or max_depth with Optuna TPE on one holdout split."""
-        X_tr, X_va, y_tr, y_va = train_test_split(
-            X,
-            y,
-            test_size=self.valid_size,
-            random_state=self.random_state,
-            stratify=y if self._stratify else None,
-        )
+    def _tune(
+        self,
+        X_tr: ArrayLike,
+        y_tr: np.ndarray,
+        X_va: ArrayLike,
+        y_va: np.ndarray,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Tune learning_rate and/or max_depth with Optuna TPE: fit on _tr, score on _va."""
 
         def objective(trial: optuna.Trial) -> float:
             trial_params = dict(params)
@@ -177,6 +209,14 @@ class XGBDefaultClassifier(ClassifierMixin, _XGBDefaultBase):
             raise ValueError(f"Only binary targets are supported, got {len(self.classes_)} classes")
         return y_encoded
 
+    def _prepare_y_valid(self, y: Any) -> np.ndarray:
+        """Encode validation labels with the classes found in the training labels."""
+        y = np.asarray(y)
+        unseen = set(np.unique(y)) - set(self.classes_)
+        if unseen:
+            raise ValueError(f"y_valid has labels not in y: {sorted(unseen)}")
+        return np.searchsorted(self.classes_, y)
+
     def _default_phi(self, X: ArrayLike, y: np.ndarray) -> float:
         return 1.0
 
@@ -200,6 +240,9 @@ class XGBDefaultRegressor(RegressorMixin, _XGBDefaultBase):
     _stratify = False
 
     def _prepare_y(self, y: Any) -> np.ndarray:
+        return np.asarray(y, dtype=float)
+
+    def _prepare_y_valid(self, y: Any) -> np.ndarray:
         return np.asarray(y, dtype=float)
 
     def _default_phi(self, X: ArrayLike, y: np.ndarray) -> float:
