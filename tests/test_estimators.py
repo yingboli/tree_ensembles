@@ -77,9 +77,19 @@ def test_optuna_tuning(binary_data: tuple) -> None:
     clf = XGBDefaultClassifier(learning_rate="optuna", max_depth="optuna", n_optuna_trials=3)
     clf.fit(X_train, y_train)
 
-    assert clf.study_ is not None and len(clf.study_.trials) == 3
-    assert 0.05 <= clf.params_["learning_rate"] <= 0.3
-    assert clf.params_["max_depth"] in {3, 4, 5, 6}
+    best = clf.optuna_best_params_
+    assert best is not None and set(best) == {"learning_rate", "max_depth"}
+    assert 0.05 <= best["learning_rate"] <= 0.3
+    assert best["max_depth"] in {3, 4, 5, 6}
+    assert clf.params_["learning_rate"] == best["learning_rate"]
+    assert clf.params_["max_depth"] == best["max_depth"]
+    # The fitted object holds no Optuna objects, so loading it never needs Optuna.
+    assert not any(type(v).__module__.startswith("optuna") for v in vars(clf).values())
+
+
+def test_no_tuning_leaves_optuna_best_params_empty(regression_data: tuple) -> None:
+    X, y = regression_data
+    assert XGBDefaultRegressor(n_estimators=5).fit(X, y).optuna_best_params_ is None
 
 
 def test_categorical_feature_and_string_labels() -> None:

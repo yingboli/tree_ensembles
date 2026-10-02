@@ -124,9 +124,12 @@ class _XGBDefaultBase(BaseEstimator):
             **extra,
         }
 
-        self.study_: optuna.Study | None = None
+        # Keep only plain best values, not the Study object, so a saved model
+        # does not depend on the installed Optuna version.
+        self.optuna_best_params_: dict[str, Any] | None = None
         if "optuna" in (self.learning_rate, self.max_depth):
-            params.update(self._tune(X, y, params))
+            self.optuna_best_params_ = self._tune(X, y, params)
+            params.update(self.optuna_best_params_)
 
         self.params_ = params
         self.model_ = self._new_model(params).fit(X, y)
@@ -154,9 +157,9 @@ class _XGBDefaultBase(BaseEstimator):
 
         optuna.logging.set_verbosity(optuna.logging.WARNING)
         sampler = optuna.samplers.TPESampler(seed=self.random_state)
-        self.study_ = optuna.create_study(direction="minimize", sampler=sampler)
-        self.study_.optimize(objective, n_trials=self.n_optuna_trials)
-        return self.study_.best_params
+        study = optuna.create_study(direction="minimize", sampler=sampler)
+        study.optimize(objective, n_trials=self.n_optuna_trials)
+        return dict(study.best_params)
 
     def predict(self, X: ArrayLike) -> np.ndarray:
         return self.model_.predict(X)

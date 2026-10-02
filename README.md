@@ -47,16 +47,23 @@ print(clf.params_)  # every parameter actually used
 ### Tuning with Optuna
 
 ```python
+from sklearn.datasets import load_diabetes
+
 from xgb_trees import XGBDefaultRegressor
+
+X, y = load_diabetes(return_X_y=True, as_frame=True)
 
 reg = XGBDefaultRegressor(
     learning_rate="optuna",  # TPE search on an 80/20 holdout, then refit on all data
     max_depth="optuna",
     n_optuna_trials=30,
 ).fit(X, y)
-print(reg.params_["learning_rate"], reg.params_["max_depth"])
-reg.study_  # the Optuna study, for inspection
+print(reg.optuna_best_params_)  # {'learning_rate': 0.0536, 'max_depth': 6}
+print(reg.phi_, reg.gamma_, reg.n_trees_)
 ```
+
+Only the best values are kept (`optuna_best_params_`, also merged into `params_`), not the
+Optuna study, so a saved model does not depend on the installed Optuna version.
 
 Both classes are scikit-learn estimators, so `clone`, `Pipeline`, `cross_val_score`
 and `GridSearchCV` work as usual.
