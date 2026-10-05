@@ -6,6 +6,8 @@ All notable changes to this project. Format based on
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-05
+
 ### Added
 
 - `tree_ensembles.bart`: `BartRegressor` and `BartClassifier` (probit) wrapping bartz, with

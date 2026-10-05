@@ -27,13 +27,13 @@ Pin a release tag (see [CHANGELOG.md](CHANGELOG.md)) or a commit, so later chang
 don't break that project:
 
 ```bash
-pip install "git+https://github.com/yingboli/tree_ensembles.git@v0.2.0"
+pip install "git+https://github.com/yingboli/tree_ensembles.git@v0.3.0"
 ```
 
 BART needs the optional `bart` extra (bartz, JAX and matplotlib):
 
 ```bash
-pip install "tree_ensembles[bart] @ git+https://github.com/yingboli/tree_ensembles.git"
+pip install "tree_ensembles[bart] @ git+https://github.com/yingboli/tree_ensembles.git@v0.3.0"
 ```
 
 ## Development setup
