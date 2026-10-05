@@ -6,6 +6,18 @@ All notable changes to this project. Format based on
 
 ## [Unreleased]
 
+### Added
+
+- `tree_ensembles.bart`: `BartRegressor` and `BartClassifier` (probit) wrapping bartz, with
+  posterior draws, predictive sd, HPDI intervals, posterior summaries, convergence diagnostics
+  (rank-normalized split R-hat, bulk/tail ESS), forest summaries (depth, leaves, variable usage,
+  split points, readable trees), plots, and dump/load. Install with the `bart` extra.
+- BART estimators impute NaN before fitting (median by default) and add missing-indicator
+  columns for features missing in more than 50% of rows (`MissingValueImputer`), a workaround
+  for how bartz bins NaN.
+- `notebooks/bart_demo.ipynb`: BART walk-through on cooking-time (regression) and
+  homesite-insurance (classification), compared with the XGBoost defaults.
+
 ## [0.2.0] - 2026-10-02
 
 ### Changed

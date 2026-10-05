@@ -9,6 +9,8 @@ dependencies:
   - scikit-learn
   - xgboost
   - optuna
+  # bart extra (bartz itself comes from pip below)
+  - matplotlib
   # notebooks
   - jupyter
   - ipykernel
@@ -20,4 +22,4 @@ dependencies:
   - pre-commit
   - pip
   - pip:
-      - -e .
+      - -e .[bart]

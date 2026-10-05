@@ -10,6 +10,10 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = ["numpy", "pandas", "scikit-learn", "xgboost", "optuna"]
 
+[project.optional-dependencies]
+# bartz pinned to a minor version: tree_ensembles.bart.trees reads its internal trace layout.
+bart = ["bartz>=0.12.1,<0.13", "matplotlib"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

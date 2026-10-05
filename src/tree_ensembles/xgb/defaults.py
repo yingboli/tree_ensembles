@@ -14,6 +14,26 @@ def ic_gamma(criterion: str, n: float, phi: float) -> float:
     error, 2 * neg. log-likelihood for logistic), so a split adding one leaf must "pay"
     the criterion's per-parameter penalty on that scale. With frequency weights,
     n is the sum of the weights.
+
+    Parameters
+    ----------
+    criterion : {"aic", "hq", "bic"}
+        Penalty per split: 2 (AIC), 3 * ln(ln n) (Hannan-Quinn) or ln n (BIC).
+    n : float
+        Number of observations (sum of the weights with frequency weights).
+    phi : float
+        Dispersion: 1 for logistic loss, the noise variance for squared error.
+
+    Returns
+    -------
+    float
+        The split penalty, to pass to XGBoost as `gamma`.
+
+    Raises
+    ------
+    ValueError
+        For an unknown criterion, or n <= e for "hq" / "bic" (the penalty would be
+        negative or meaningless), which usually means weights that are not frequencies.
     """
     if criterion not in ("aic", "hq", "bic"):
         raise ValueError(f"criterion must be 'aic', 'hq' or 'bic', got {criterion!r}")
@@ -30,7 +50,19 @@ def ic_gamma(criterion: str, n: float, phi: float) -> float:
 
 
 def default_max_bin(n: int) -> int:
-    """max(256, (2n)^(1/3)); only exceeds 256 for n above ~8.4 million."""
+    """Number of histogram bins per feature: max(256, ceil((2 n) ** (1/3))).
+
+    The cube-root rule only exceeds XGBoost's default of 256 for n above ~8.4 million rows.
+
+    Parameters
+    ----------
+    n : int
+        Number of training rows.
+
+    Returns
+    -------
+    int
+    """
     return max(256, math.ceil((2 * n) ** (1 / 3)))
 
 
@@ -41,7 +73,30 @@ def estimate_phi(
     base_margin: np.ndarray | None = None,
     random_state: int = 0,
 ) -> float:
-    """Rough (weighted) residual variance from a deliberately under-fitted XGBoost model."""
+    """Rough (weighted) residual variance from a deliberately under-fitted XGBoost model.
+
+    Fits 100 depth-2 trees with learning rate 0.1 and returns the weighted mean squared
+    training residual. Being under-fitted, it errs on the high side, which makes the
+    split penalty a little more cautious.
+
+    Parameters
+    ----------
+    X : DataFrame or array of shape (n, p)
+        Training features.
+    y : ndarray of shape (n,)
+        Training target.
+    sample_weight : ndarray of shape (n,), optional
+        Frequency weights.
+    base_margin : ndarray of shape (n,), optional
+        Offset on the margin scale.
+    random_state : int, default 0
+        XGBoost seed.
+
+    Returns
+    -------
+    float
+        Estimated noise variance phi.
+    """
     model = xgb.XGBRegressor(
         n_estimators=100,
         max_depth=2,

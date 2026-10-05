@@ -1,7 +1,7 @@
 # tree_ensembles
 
-Tree ensembles for my R&D and learning: my default XGBoost setup (`tree_ensembles.xgb`),
-with BART to come.
+Tree ensembles for my R&D and learning: my default XGBoost setup (`tree_ensembles.xgb`)
+and BART with posterior tools (`tree_ensembles.bart`, built on [bartz](https://github.com/bartz-org/bartz)).
 
 ## Install from GitHub
 
@@ -28,6 +28,12 @@ don't break that project:
 
 ```bash
 pip install "git+https://github.com/yingboli/tree_ensembles.git@v0.2.0"
+```
+
+BART needs the optional `bart` extra (bartz, JAX and matplotlib):
+
+```bash
+pip install "tree_ensembles[bart] @ git+https://github.com/yingboli/tree_ensembles.git"
 ```
 
 ## Development setup
@@ -128,6 +134,64 @@ pred = reg.predict(X, base_margin=offset)  # pass the offset again
 Both classes are scikit-learn estimators, so `clone`, `Pipeline`, `cross_val_score`
 and `GridSearchCV` work as usual.
 
+## BART
+
+```python
+import jax
+
+jax.config.update("jax_num_cpu_devices", 4)  # optional: run the 4 chains in parallel on CPU
+
+from sklearn.datasets import load_diabetes
+from sklearn.model_selection import train_test_split
+
+from tree_ensembles.bart import BartRegressor
+
+X, y = load_diabetes(return_X_y=True, as_frame=True)
+X_train, X_test, y_train, y_test = train_test_split(X, y, random_state=0)
+
+bart = BartRegressor(num_trees=200, n_save=1000, n_burn=1000, num_chains=4)
+bart.fit(X_train, y_train)
+
+bart.predict(X_test)  # posterior mean of f(x)
+bart.predict_dist(X_test)  # mean, sd of f(x), posterior predictive sd
+bart.predict_interval(X_test, prob=0.95, kind="predictive")  # 95% HPDI for a new y
+bart.predict_samples(X_test)  # all posterior draws of f(x), shape (draws, rows)
+
+print(bart.posterior_summary())  # sigma, tree size: mean, sd, 95% HPDI, R-hat, ESS
+print(bart.diagnostics())  # convergence, including f(x) at 20 of the training rows
+
+forest = bart.forest_summary()
+print(forest.depth_distribution())  # share of trees by depth (0 = single leaf)
+print(forest.variable_usage())  # splits per feature
+print(bart.split_points().head())  # most used cut values
+print(bart.format_tree(chain=0, draw=0, tree=0))  # one tree, readable
+```
+
+`BartClassifier` works the same way (probit BART), with `predict_proba` and intervals for p(x).
+`bart.parameter_draws()` returns the raw (chain, draw) draws behind `posterior_summary()`.
+A full walk-through on two TabReD datasets is in `notebooks/bart_demo.ipynb`.
+Plots: `from tree_ensembles.bart.plots import plot_trace, plot_rank, plot_tree_sizes,
+plot_variable_usage`.
+
+- **Convergence:** `diagnostics()` warns when R-hat > 1.01 or ESS < 400 (Vehtari et al. 2021).
+  Use several chains (default 4); in BART, sigma and the tree sizes often mix slowly, so check
+  them before trusting intervals. Fix with a longer `n_burn` / `n_save` or more chains.
+- **Missing values:** handled for you. bartz bins NaN poorly (every NaN counts as a distinct
+  value when choosing cutpoints, crowding out real cutpoints and creating splits that do
+  nothing; reported upstream). Until that is fixed, the BART estimators median-impute NaN
+  (training medians, `impute_strategy="median"` or `"mean"`) and add a `<name>_missing` column for
+  each feature missing in more than 50% of the training rows (`missing_indicator_threshold`;
+  0 adds one for every feature with NaN). `model_feature_names_` lists the columns bartz sees.
+  `impute_strategy=None` passes NaN to bartz unchanged. The step is also available on its own as
+  `MissingValueImputer`.
+- **Tree prior and thinning:** `power`, `base` (a node at depth d splits with probability
+  `base / (1 + d) ** power`) and `n_skip` (keep every n-th draw) are named arguments.
+- **Other bartz options** (`sparse`, `k`, `sigma_df`, ...) go in
+  `bartz_params={...}`. Sample weights and offsets are not supported yet.
+- **Saving:** `bart.dump("folder")` / `BartRegressor.load("folder")` use bartz's own format,
+  which depends on the bartz/JAX versions: good for caching, not for archiving. With many trees
+  the file is large (about 4 GB for 10,000 trees x 1,000 draws).
+
 ## Daily commands
 
 ```bash
@@ -143,9 +207,16 @@ src/tree_ensembles/
     estimators.py    XGBDefaultClassifier, XGBDefaultRegressor
     defaults.py      gamma, max_bin and phi helpers
     callbacks.py     StopOnEmptyTree
-  bart/              BART (to come)
+  bart/              BART (from tree_ensembles.bart import ...)
+    estimators.py    BartRegressor, BartClassifier
+    intervals.py     hpdi, quantile_interval
+    diagnostics.py   split_rhat, ess_bulk, ess_tail, summarize_draws
+    missing.py       MissingValueImputer (NaN workaround for bartz)
+    trees.py         forest summaries (the only code reading bartz internals)
+    plots.py         trace, rank, tree-size and variable-usage plots
 tests/
   xgb/               pytest tests for tree_ensembles.xgb
-notebooks/           exploratory notebooks
+  bart/              pytest tests for tree_ensembles.bart
+notebooks/           bart_demo.ipynb (BART walk-through) and exploratory notebooks
 CHANGELOG.md         what changed in each version
 ```
