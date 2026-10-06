@@ -1,7 +1,13 @@
-.PHONY: env lint format typecheck test check
+.PHONY: env kernel lint format typecheck test check
 
-env:        ## create the conda env
+ENV := tree_ensembles
+
+env:        ## create the conda env and register its Jupyter kernel
 	conda env create -f environment.yml
+	$(MAKE) kernel
+
+kernel:     ## register (or refresh) the env as the Jupyter kernel "tree_ensembles"
+	conda run -n $(ENV) python -m ipykernel install --user --name $(ENV) --display-name $(ENV)
 
 lint:       ## check style without changing files
 	ruff check .

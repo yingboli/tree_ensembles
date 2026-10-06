@@ -39,10 +39,13 @@ pip install "tree_ensembles[bart] @ git+https://github.com/yingboli/tree_ensembl
 ## Development setup
 
 ```bash
-make env                 # create the conda env from environment.yml (installs this repo editable)
+make env                 # create the conda env (installs this repo editable) and its Jupyter kernel
 conda activate tree_ensembles
 pre-commit install       # run ruff on every commit
 ```
+
+In Jupyter, pick the kernel **tree_ensembles**. After recreating or renaming the env,
+`make kernel` registers it again.
 
 ## Quick start
 
