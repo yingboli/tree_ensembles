@@ -96,6 +96,11 @@ def test_tree_walk_matches_bartz_for_both_kinds_of_nan_features() -> None:
     )
     with pytest.warns(UserWarning, match="NaN"):
         reg.fit(X, y)
+    # without imputation, NaN reach the trees and the missing direction is reported
+    assert set(reg.trees_to_dataframe(draws=0).dropna(subset=["condition"])["missing"]) <= {
+        "left",
+        "right",
+    }
 
     trees = tree_arrays(reg.bart_)
     real_cuts = [int(np.sum(~np.isnan(c))) for c in trees.cutpoints]
@@ -107,3 +112,49 @@ def test_tree_walk_matches_bartz_for_both_kinds_of_nan_features() -> None:
         np.testing.assert_allclose(
             predict_one_draw(reg.bart_, X, 0, draw), latent[0, draw], atol=1e-5
         )
+
+
+def _walk(table: pd.DataFrame, x: np.ndarray, feature_index: dict[str, int]) -> float:
+    """Sum of the leaf values one row reaches, walking every tree of the table."""
+    total = 0.0
+    for _, tree in table.groupby(["chain", "draw", "tree"]):
+        nodes = {int(r["node"]): r for r in tree.to_dict("records")}
+        node = min(nodes)  # the root
+        while not nodes[node]["is_leaf"]:
+            row = nodes[node]
+            value = x[feature_index[row["feature"]]]
+            node = int(row["left"] if value <= row["cutpoint"] else row["right"])
+        total += float(nodes[node]["leaf_value"])
+    return total
+
+
+def test_trees_to_dataframe_reproduces_predictions(
+    fitted_regressor: BartRegressor, regression_data: tuple
+) -> None:
+    X, _ = regression_data
+    table = fitted_regressor.trees_to_dataframe(chains=1, draws=-1)  # all trees of one draw
+    assert set(table["chain"]) == {1} and set(table["draw"]) == {299}
+    assert table.groupby("tree").size().size == 50
+    latent = fitted_regressor._draws(X[:5], "latent_samples")[1, 299]
+    offset = float(fitted_regressor.bart_._main_trace.offset)
+    index = {name: j for j, name in enumerate(fitted_regressor.model_feature_names_)}
+    for i in range(5):
+        walked = offset + _walk(table, X.to_numpy()[i], index)
+        assert walked == pytest.approx(latent[i], abs=1e-4)
+
+
+def test_trees_to_dataframe_columns_and_num_rows(
+    fitted_regressor: BartRegressor, regression_data: tuple
+) -> None:
+    X, _ = regression_data
+    table = fitted_regressor.trees_to_dataframe(chains=0, draws=[0, -1], trees=[0, 1], X=X[:100])
+    assert len(table.groupby(["chain", "draw", "tree"])) == 4
+    splits, leaves = table[~table["is_leaf"]], table[table["is_leaf"]]
+    assert splits["condition"].str.contains(" <= ").all()
+    assert leaves["left"].isna().all() and leaves["leaf_value"].notna().all()
+    for _, tree in table.groupby(["draw", "tree"]):
+        rows = tree.set_index("node")["num_rows"]
+        assert rows.iloc[0] == 100  # every row reaches the root
+        assert tree.loc[tree["is_leaf"], "num_rows"].sum() == 100  # and exactly one leaf
+        for row in tree[~tree["is_leaf"]].itertuples():
+            assert rows[row.left] + rows[row.right] == rows[row.node]

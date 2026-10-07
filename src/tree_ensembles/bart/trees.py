@@ -411,3 +411,151 @@ def predict_one_draw(bart: Bart, X: np.ndarray, chain: int, draw: int) -> np.nda
             node = np.where(active, 2 * node + right, node)
         total += trees.leaf[chain, draw, t][node]
     return trees.offset + trees.leaf_unit * total
+
+
+def _selection(index: int | list[int] | None, size: int) -> np.ndarray:
+    """Positions picked by an int, a list of ints (negative ints count from the end) or None."""
+    if index is None:
+        return np.arange(size)
+    return np.arange(size)[np.atleast_1d(np.asarray(index, dtype=int))]
+
+
+def trees_to_dataframe(
+    bart: Bart,
+    feature_names: list[str],
+    chains: int | list[int] | None = None,
+    draws: int | list[int] | None = None,
+    trees: int | list[int] | None = None,
+    X: np.ndarray | None = None,
+) -> pd.DataFrame:
+    """All nodes of the selected trees as a table, like XGBoost's Booster.trees_to_dataframe.
+
+    Parameters
+    ----------
+    bart : bartz.Bart
+        A fitted model.
+    feature_names : list of str
+        One name per feature, in the column order bartz was fit on.
+    chains, draws, trees : int, list of int or None, default None (all)
+        Which trees to include; negative ints count from the end (e.g. draws=-1 is the last
+        draw). The full table has one row per node of every tree in every draw, which can
+        be millions of rows, so select a few draws or trees when exploring.
+    X : ndarray of shape (n, p), optional
+        Rows in the columns bartz was fit on. If given, a `num_rows` column counts how many of
+        them reach each node.
+
+    Returns
+    -------
+    DataFrame with one row per node, sorted by chain, draw, tree and node, with columns:
+        chain, draw, tree  which tree
+        node               heap index: 1 is the root, node i has children 2i and 2i + 1
+        depth              0 for the root (depths count levels of splits, like XGBoost)
+        is_leaf            True for leaves
+        feature            split feature (None for leaves)
+        cutpoint           a row goes to `left` if x <= cutpoint, else to `right`; NaN marks
+                           a split at a NaN cutpoint (see the module notes)
+        condition          the split as text, true for rows going left, e.g. "age <= 41.5"
+        left, right        heap index of the children (<NA> for leaves)
+        missing            child that a missing (NaN) value goes to: "left" or "right"
+        leaf_value         the leaf's contribution to the latent prediction (NaN for splits);
+                           a draw's prediction is offset + the sum over trees of its leaves
+        num_rows           number of rows of X reaching the node: arriving at a split, or
+                           ending in a leaf (only when X is given; unlike XGBoost's cover,
+                           a plain row count)
+    """
+    arrays = tree_arrays(bart)
+    n_chains, n_draws, n_trees, half = arrays.split.shape
+    c_idx, d_idx, t_idx = (
+        _selection(chains, n_chains),
+        _selection(draws, n_draws),
+        _selection(trees, n_trees),
+    )
+    pick = np.ix_(c_idx, d_idx, t_idx)
+    split, var, leaf = arrays.split[pick], arrays.var[pick], arrays.leaf[pick]
+
+    # which heap slots are real nodes: the root, and every child of a decision node
+    internal = np.concatenate([internal_nodes(split), np.zeros_like(split, dtype=bool)], axis=-1)
+    in_tree = np.zeros_like(internal)
+    in_tree[..., 1] = True
+    in_tree[..., 2:] = internal[..., np.arange(2, 2 * half) // 2]
+    c, d, t, node = np.nonzero(in_tree)
+    is_leaf = ~internal[c, d, t, node]
+
+    # split details (only meaningful for decision nodes, which all sit below `half`)
+    slot = np.minimum(node, half - 1)
+    feat = var[c, d, t, slot].astype(int)
+    s = split[c, d, t, slot].astype(int)
+    longest = max(len(cuts) for cuts in arrays.cutpoints)
+    cut_table = np.full((len(arrays.cutpoints), max(longest, 1)), np.nan)
+    for j, cuts in enumerate(arrays.cutpoints):
+        cut_table[j, : len(cuts)] = cuts
+    cutpoint = np.where(is_leaf, np.nan, cut_table[feat, np.maximum(s - 1, 0)])
+    missing_right = arrays.nan_bin[feat] >= s
+    names = np.asarray(feature_names, dtype=object)[feat]
+    condition = [
+        None
+        if leaf_
+        else f"{name} <= {cut:.4g}"
+        if not np.isnan(cut)
+        else f"{name} is not missing"
+        if right
+        else f"{name}: NaN cutpoint (all rows left)"
+        for leaf_, name, cut, right in zip(is_leaf, names, cutpoint, missing_right, strict=True)
+    ]
+
+    table = pd.DataFrame(
+        {
+            "chain": c_idx[c],
+            "draw": d_idx[d],
+            "tree": t_idx[t],
+            "node": node,
+            "depth": node_depths(2 * half)[node],
+            "is_leaf": is_leaf,
+            "feature": [
+                None if leaf_ else name for leaf_, name in zip(is_leaf, names, strict=True)
+            ],
+            "cutpoint": cutpoint,
+            "condition": condition,
+            "left": pd.array(np.where(is_leaf, -1, 2 * node), dtype="Int64"),
+            "right": pd.array(np.where(is_leaf, -1, 2 * node + 1), dtype="Int64"),
+            "missing": [
+                None if leaf_ else ("right" if right else "left")
+                for leaf_, right in zip(is_leaf, missing_right, strict=True)
+            ],
+            "leaf_value": np.where(is_leaf, leaf[c, d, t, node] * arrays.leaf_unit, np.nan),
+        }
+    )
+    table.loc[table["is_leaf"], ["left", "right"]] = pd.NA
+    if X is not None:
+        table["num_rows"] = _num_rows(arrays, np.asarray(X, dtype=np.float32), table)
+    return table
+
+
+def _num_rows(arrays: TreeArrays, X: np.ndarray, table: pd.DataFrame) -> np.ndarray:
+    """Number of rows of X reaching each node listed in `table` (one tree at a time)."""
+    half = arrays.split.shape[-1]
+    counts = np.zeros(len(table), dtype=int)
+    ids = table[["chain", "draw", "tree"]].to_numpy()
+    combos, which = np.unique(ids, axis=0, return_inverse=True)
+    for k, (c, d, t) in enumerate(combos):
+        rows = np.flatnonzero(which.ravel() == k)  # the table rows of this tree
+        var, split = arrays.var[c, d, t], arrays.split[c, d, t]
+        per_node = np.zeros(2 * half, dtype=int)
+        node = np.ones(len(X), dtype=int)
+        per_node[1] = len(X)
+        for _ in range(int(np.log2(half))):  # one level of splits per pass
+            inside = node < half
+            s = np.where(inside, split[np.minimum(node, half - 1)], 0)
+            active = s > 0
+            j = var[np.minimum(node, half - 1)].astype(int)
+            cut = np.array(
+                [
+                    arrays.cutpoints[jj][ss - 1] if a else 0.0
+                    for jj, ss, a in zip(j, s, active, strict=True)
+                ]
+            )
+            right = goes_right(X[np.arange(len(X)), j], s, cut, arrays.nan_bin[j])
+            node = np.where(active, 2 * node + right, node)
+            np.add.at(per_node, node[active], 1)
+        counts[rows] = per_node[table["node"].to_numpy()[rows]]
+    return counts

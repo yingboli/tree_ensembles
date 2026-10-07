@@ -170,6 +170,26 @@ print(bart.split_points().head())  # most used cut values
 print(bart.format_tree(chain=0, draw=0, tree=0))  # one tree, readable
 ```
 
+### Trees as tables and plots (BART and XGBoost)
+
+```python
+from tree_ensembles.tree_plot import plot_tree, plot_trees
+from tree_ensembles.xgb import XGBDefaultRegressor
+
+table = bart.trees_to_dataframe(chains=0, draws=-1, X=X_test)  # one row per node
+plot_tree(table[table["tree"] == 0])  # one tree: splits, leaf values, rows reaching each node
+plot_trees(table[table["tree"] < 6])  # several trees, shared leaf color scale
+
+xgb_table = XGBDefaultRegressor().fit(X_train, y_train).trees_to_dataframe(trees=[0, 1])
+plot_trees(xgb_table, max_depth=2)  # same plots for XGBoost; deep trees cut at depth 2
+```
+
+Both `trees_to_dataframe` methods return the same columns (node, depth, is_leaf, feature,
+cutpoint, condition, left, right, missing, leaf_value), so `tree_plot` draws either.
+BART splits read `x <= cut`, XGBoost splits `x < cut`. Node sizes differ: BART's `num_rows`
+counts the rows of the `X` you pass; XGBoost's `cover` is the sum of the hessians of the
+training rows (the row count only for squared error without weights).
+
 `BartClassifier` works the same way (probit BART), with `predict_proba` and intervals for p(x).
 `bart.parameter_draws()` returns the raw (chain, draw) draws behind `posterior_summary()`.
 A full walk-through on two TabReD datasets is in `notebooks/bart_demo.ipynb`.
@@ -217,6 +237,7 @@ src/tree_ensembles/
     missing.py       MissingValueImputer (NaN workaround for bartz)
     trees.py         forest summaries (the only code reading bartz internals)
     plots.py         trace, rank, tree-size and variable-usage plots
+  tree_plot.py       plot_tree, plot_trees (BART and XGBoost trees)
 tests/
   xgb/               pytest tests for tree_ensembles.xgb
   bart/              pytest tests for tree_ensembles.bart

@@ -30,6 +30,7 @@ from sklearn.model_selection import train_test_split
 from tree_ensembles._base import KwargsEstimator
 from tree_ensembles.xgb.callbacks import StopOnEmptyTree
 from tree_ensembles.xgb.defaults import default_max_bin, estimate_phi, ic_gamma
+from tree_ensembles.xgb.trees import trees_to_dataframe as _trees_table
 
 ArrayLike = pd.DataFrame | np.ndarray
 
@@ -359,6 +360,23 @@ class _XGBDefaultBase(KwargsEstimator):
         ndarray of shape (m,)
         """
         return self.model_.predict(X, base_margin=_as_float_array(base_margin))
+
+    def trees_to_dataframe(self, trees: int | list[int] | None = None) -> pd.DataFrame:
+        """All nodes of the fitted trees as a table, in the same format as BART's.
+
+        Parameters
+        ----------
+        trees : int, list of int or None, default None (all)
+            Which trees (boosting rounds) to include.
+
+        Returns
+        -------
+        DataFrame with one row per node: tree, node, depth, is_leaf, feature, cutpoint,
+        condition, left, right, missing, leaf_value, gain and cover. See
+        tree_ensembles.xgb.trees.trees_to_dataframe for the column meanings. Plot it with
+        tree_ensembles.tree_plot.plot_tree / plot_trees.
+        """
+        return _trees_table(self.model_, trees)
 
 
 def _shared_doc(cls: type) -> str:

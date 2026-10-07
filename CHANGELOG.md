@@ -6,6 +6,15 @@ All notable changes to this project. Format based on
 
 ## [Unreleased]
 
+### Added
+
+- `trees_to_dataframe` for BART (`BartRegressor` / `BartClassifier`) and XGBoost
+  (`XGBDefault*`): every node of the selected trees as a table, like XGBoost's own, with the
+  same columns for both (BART: optional `num_rows` from any `X`; XGBoost keeps its `cover`).
+- `tree_ensembles.tree_plot`: `plot_tree` and `plot_trees` draw BART or XGBoost trees from
+  that table (splits, leaf values, node sizes; `max_depth` to cut deep trees).
+- `CLAUDE.md` with project conventions.
+
 ### Changed
 
 - Extra XGBoost / bartz parameters are plain keyword arguments (`**xgb_params`,

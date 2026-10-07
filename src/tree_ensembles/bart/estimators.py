@@ -31,6 +31,7 @@ from tree_ensembles.bart import trees
 from tree_ensembles.bart.diagnostics import summarize_draws
 from tree_ensembles.bart.intervals import hpdi, quantile_interval
 from tree_ensembles.bart.missing import MissingValueImputer
+from tree_ensembles.bart.trees import trees_to_dataframe as _trees_table
 
 ArrayLike = pd.DataFrame | np.ndarray
 
@@ -543,6 +544,41 @@ class _BartBase(KwargsEstimator):
         left) or an "is missing" split, depending on the feature (see trees.py).
         """
         return trees.split_points(self.bart_, self.model_feature_names_)
+
+    def trees_to_dataframe(
+        self,
+        chains: int | list[int] | None = None,
+        draws: int | list[int] | None = None,
+        trees: int | list[int] | None = None,
+        X: ArrayLike | None = None,
+    ) -> pd.DataFrame:
+        """All nodes of the selected sampled trees as a table, like XGBoost's.
+
+        Parameters
+        ----------
+        chains, draws, trees : int, list of int or None, default None (all)
+            Which trees to include; negative ints count from the end (draws=-1 is the
+            last draw). All draws of all trees can be millions of rows: select a few.
+        X : DataFrame or array of shape (n, p), optional
+            Same columns as in fit. If given, a `num_rows` column counts the rows of X
+            reaching each node (after the same NaN imputation as in fit).
+
+        Returns
+        -------
+        DataFrame with one row per node: chain, draw, tree, node, depth, is_leaf,
+        feature, cutpoint, condition, left, right, missing, leaf_value (and num_rows). See
+        trees.trees_to_dataframe for the column meanings. Plot it with
+        tree_ensembles.tree_plot.plot_tree / plot_trees.
+
+        When NaN are imputed before fitting (impute_strategy, the default), no NaN ever
+        reaches the trees, so `missing` is None: a missing direction would mean nothing.
+        """
+        X_model = None if X is None else self._model_X(self._check_X(X))
+        # `trees` (the argument) hides the trees module here, hence the _trees_table alias
+        table = _trees_table(self.bart_, self.model_feature_names_, chains, draws, trees, X_model)
+        if self.imputer_ is not None:  # NaN were imputed: no missing direction to report
+            table["missing"] = None
+        return table
 
     def format_tree(self, chain: int = 0, draw: int = 0, tree: int = 0) -> str:
         """One sampled tree as readable text, with feature names, cut values and leaves.
