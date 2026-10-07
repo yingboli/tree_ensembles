@@ -5,12 +5,12 @@ Defaults (each one can be overridden by passing your own value):
     n_estimators = 2000, stopped once a tree has no split and a tiny leaf
     gamma        = information-criterion penalty * phi   (AIC, HQ or BIC; default HQ)
     phi          = 1 for binary:logistic, residual variance from an under-fitted model otherwise
-    eta          = 0.1, or "optuna" to tune it in [0.05, 0.3]
+    eta          = 0.1, or "optuna" to tune it in [0.05, 0.3] on a log scale
     max_depth    = 6, or "optuna" to tune it in {3, 4, 5, 6}
                    (tuning scores on fit(..., X_valid=, y_valid=) if given,
                    otherwise on a random holdout of size valid_size)
     tree_method  = "hist", max_bin = max(256, (2n)^(1/3)), enable_categorical = True
-Any other XGBoost parameter goes in `xgb_params`.
+Any other XGBoost parameter can be passed as a keyword argument, e.g. subsample=0.8.
 
 fit() also takes sample_weight (frequency weights: n = sum of weights) and
 base_margin (an offset on the margin scale, passed to XGBoost as given).
@@ -23,10 +23,11 @@ import numpy as np
 import optuna
 import pandas as pd
 import xgboost as xgb
-from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
+from sklearn.base import ClassifierMixin, RegressorMixin
 from sklearn.metrics import log_loss, root_mean_squared_error
 from sklearn.model_selection import train_test_split
 
+from tree_ensembles._base import KwargsEstimator
 from tree_ensembles.xgb.callbacks import StopOnEmptyTree
 from tree_ensembles.xgb.defaults import default_max_bin, estimate_phi, ic_gamma
 
@@ -56,23 +57,7 @@ def _as_float_array(a: Any) -> np.ndarray | None:
     return None if a is None else np.asarray(a, dtype=float)
 
 
-# Parameters this class sets itself; they must not also be passed in `xgb_params`.
-_MANAGED_PARAMS = {
-    "objective",
-    "base_score",
-    "n_estimators",
-    "gamma",
-    "learning_rate",
-    "max_depth",
-    "max_bin",
-    "tree_method",
-    "enable_categorical",
-    "random_state",
-    "callbacks",
-}
-
-
-class _XGBDefaultBase(BaseEstimator):
+class _XGBDefaultBase(KwargsEstimator):
     """Shared fitting logic of XGBDefaultClassifier and XGBDefaultRegressor (use those classes).
 
     Parameters
@@ -94,7 +79,8 @@ class _XGBDefaultBase(BaseEstimator):
         Maximum number of boosting rounds; usually far fewer are trained because of
         `stop_on_empty_tree`.
     learning_rate : float or "optuna", default 0.1
-        Shrinkage (eta). "optuna" tunes it with Optuna TPE in [0.05, 0.3].
+        Shrinkage (eta). "optuna" tunes it with Optuna TPE in [0.05, 0.3], sampled on a log
+        scale (the learning rate acts multiplicatively).
     max_depth : int or "optuna", default 6
         Maximum tree depth. "optuna" tunes it in {3, 4, 5, 6}.
     max_bin : int, optional
@@ -114,9 +100,10 @@ class _XGBDefaultBase(BaseEstimator):
         for tuning: the final model is always fit on all of (X, y).
     random_state : int, default 0
         Seed for XGBoost, the tuning holdout split and the Optuna sampler.
-    xgb_params : dict, optional
-        Any other XGBoost parameter, e.g. {"subsample": 0.8, "n_jobs": 4}. Must not repeat
-        one of the named parameters above (that raises a ValueError in fit).
+    **xgb_params
+        Any other XGBoost parameter, e.g. subsample=0.8, n_jobs=4. They work with
+        get_params, set_params, clone and GridSearchCV like the named parameters.
+        `objective` and `callbacks` are set by this class and raise a ValueError.
 
     Attributes
     ----------
@@ -137,6 +124,7 @@ class _XGBDefaultBase(BaseEstimator):
         Classifier only: the two class labels; predict_proba columns follow this order.
     """
 
+    _kwargs_attr = "xgb_params"  # where KwargsEstimator keeps the **xgb_params
     _objective: str  # XGBoost objective, set by each subclass
     _stratify: bool  # stratify the tuning holdout split by y (classifier only)
 
@@ -156,7 +144,7 @@ class _XGBDefaultBase(BaseEstimator):
         n_optuna_trials: int = 30,
         valid_size: float = 0.2,
         random_state: int = 0,
-        xgb_params: dict[str, Any] | None = None,
+        **xgb_params: Any,
     ) -> None:
         self.criterion = criterion
         self.phi = phi
@@ -261,10 +249,11 @@ class _XGBDefaultBase(BaseEstimator):
                 _as_float_array(base_margin_valid),
             )
 
-        extra = dict(self.xgb_params or {})
-        repeated = _MANAGED_PARAMS & extra.keys()
-        if repeated:
-            raise ValueError(f"Set {sorted(repeated)} with the named arguments, not xgb_params")
+        # XGBoost parameters this class sets that are not named arguments above.
+        extra = dict(self.xgb_params)
+        reserved = {"objective", "callbacks"} & extra.keys()
+        if reserved:
+            raise ValueError(f"{sorted(reserved)} are set by this class and cannot be passed")
 
         w = train.sample_weight
         n_info = float(np.sum(w)) if w is not None else len(train.y)
@@ -342,7 +331,9 @@ class _XGBDefaultBase(BaseEstimator):
             """Validation loss of one Optuna trial (lower is better)."""
             trial_params = dict(params)
             if self.learning_rate == "optuna":
-                trial_params["learning_rate"] = trial.suggest_float("learning_rate", 0.05, 0.3)
+                trial_params["learning_rate"] = trial.suggest_float(
+                    "learning_rate", 0.05, 0.3, log=True
+                )
             if self.max_depth == "optuna":
                 trial_params["max_depth"] = trial.suggest_int("max_depth", 3, 6)
             return self._valid_loss(self._fit_model(trial_params, fit_data), valid)

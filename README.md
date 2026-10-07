@@ -75,11 +75,11 @@ print(clf.params_)  # every parameter actually used
 | `n_estimators` | 2000, stop at the first tree with no split (and a tiny leaf) | `n_estimators=500`, `stop_on_empty_tree=False` |
 | `gamma` | HQ: 3·ln(ln n)·phi | `criterion="aic"` (2·phi), `"bic"` (ln n·phi), or `gamma=1.0` |
 | `phi` | 1 (classifier); residual variance of an under-fitted model (regressor) | `phi=2.0` |
-| `learning_rate` | 0.1 | a number, or `"optuna"` to tune in [0.05, 0.3] |
+| `learning_rate` | 0.1 | a number, or `"optuna"` to tune in [0.05, 0.3] (log scale) |
 | `max_depth` | 6 | a number, or `"optuna"` to tune in {3, 4, 5, 6} |
 | `tree_method`, `max_bin` | `"hist"`, max(256, (2n)^(1/3)) | `tree_method=...`, `max_bin=...` |
 | `enable_categorical` | True (use pandas `category` columns) | `enable_categorical=False` |
-| anything else | XGBoost's default | `xgb_params={"subsample": 0.8, "n_jobs": 4}` |
+| anything else | XGBoost's default | keyword arguments, e.g. `subsample=0.8, n_jobs=4` |
 
 ### Tuning with Optuna
 
@@ -95,7 +95,7 @@ reg = XGBDefaultRegressor(
     max_depth="optuna",
     n_optuna_trials=30,
 ).fit(X, y)
-print(reg.optuna_best_params_)  # {'learning_rate': 0.0536, 'max_depth': 6}
+print(reg.optuna_best_params_)  # {'learning_rate': 0.151, 'max_depth': 3}
 print(reg.phi_, reg.gamma_, reg.n_trees_)
 
 # Or score the trials on your own validation set (e.g. the most recent period,
@@ -189,8 +189,8 @@ plot_variable_usage`.
   `MissingValueImputer`.
 - **Tree prior and thinning:** `power`, `base` (a node at depth d splits with probability
   `base / (1 + d) ** power`) and `n_skip` (keep every n-th draw) are named arguments.
-- **Other bartz options** (`sparse`, `k`, `sigma_df`, ...) go in
-  `bartz_params={...}`. Sample weights and offsets are not supported yet.
+- **Other bartz options** (`sparse`, `k`, `sigma_df`, ...) are keyword arguments, e.g.
+  `BartRegressor(k=3.0)`. Sample weights and offsets are not supported yet.
 - **Saving:** `bart.dump("folder")` / `BartRegressor.load("folder")` use bartz's own format,
   which depends on the bartz/JAX versions: good for caching, not for archiving. With many trees
   the file is large (about 4 GB for 10,000 trees x 1,000 draws).

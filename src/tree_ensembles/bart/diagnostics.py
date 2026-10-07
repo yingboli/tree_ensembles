@@ -14,10 +14,6 @@ from scipy.stats import norm, rankdata
 
 from tree_ensembles.bart.intervals import hpdi
 
-# Usual thresholds (Vehtari et al. 2021): R-hat below 1.01 and ESS above 400.
-RHAT_MAX = 1.01
-ESS_MIN = 400
-
 
 def _as_chains(draws: np.ndarray) -> np.ndarray:
     """Draws as a float (chain, draw) array; a 1-D array becomes a single chain."""
@@ -154,7 +150,12 @@ def ess_tail(draws: np.ndarray) -> float:
     return min(_ess((x <= q05).astype(float)), _ess((x <= q95).astype(float)))
 
 
-def summarize_draws(draws: dict[str, np.ndarray], prob: float = 0.95) -> pd.DataFrame:
+def summarize_draws(
+    draws: dict[str, np.ndarray],
+    prob: float = 0.95,
+    rhat_max: float = 1.01,
+    ess_min: float = 400,
+) -> pd.DataFrame:
     """One row per quantity: mean, sd, HPDI, R-hat, bulk/tail ESS and an `ok` flag.
 
     Parameters
@@ -163,11 +164,15 @@ def summarize_draws(draws: dict[str, np.ndarray], prob: float = 0.95) -> pd.Data
         Draws of each scalar quantity.
     prob : float, default 0.95
         Probability inside the HPDI.
+    rhat_max : float, default 1.01
+        Largest acceptable R-hat (Vehtari et al. 2021).
+    ess_min : float, default 400
+        Smallest acceptable bulk and tail ESS (Vehtari et al. 2021).
 
     Returns
     -------
     DataFrame indexed by name, with columns mean, sd, hpdi_<prob>_low, hpdi_<prob>_high,
-    rhat, ess_bulk, ess_tail and ok (R-hat < RHAT_MAX and both ESS > ESS_MIN).
+    rhat, ess_bulk, ess_tail and ok (R-hat < rhat_max and both ESS > ess_min).
     """
     rows = []
     for name, d in draws.items():
@@ -184,7 +189,7 @@ def summarize_draws(draws: dict[str, np.ndarray], prob: float = 0.95) -> pd.Data
                 "rhat": rhat,
                 "ess_bulk": bulk,
                 "ess_tail": tail,
-                "ok": bool(rhat < RHAT_MAX and min(bulk, tail) > ESS_MIN),
+                "ok": bool(rhat < rhat_max and min(bulk, tail) > ess_min),
             }
         )
     return pd.DataFrame(rows).set_index("name")

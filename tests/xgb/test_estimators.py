@@ -7,7 +7,7 @@ import pytest
 from sklearn.base import clone
 from sklearn.datasets import load_breast_cancer
 from sklearn.metrics import r2_score, roc_auc_score
-from sklearn.model_selection import cross_val_score, train_test_split
+from sklearn.model_selection import GridSearchCV, cross_val_score, train_test_split
 
 from tree_ensembles.xgb import XGBDefaultClassifier, XGBDefaultRegressor
 
@@ -56,7 +56,7 @@ def test_regressor_defaults(regression_data: tuple) -> None:
 
 def test_user_overrides(regression_data: tuple) -> None:
     X, y = regression_data
-    reg = XGBDefaultRegressor(gamma=0.0, max_depth=3, xgb_params={"subsample": 0.8})
+    reg = XGBDefaultRegressor(gamma=0.0, max_depth=3, subsample=0.8)
     reg.set_params(n_estimators=20).fit(X, y)
     assert reg.params_["gamma"] == 0.0
     assert reg.params_["max_depth"] == 3
@@ -67,10 +67,28 @@ def test_user_overrides(regression_data: tuple) -> None:
     assert bic.gamma_ == pytest.approx(math.log(len(y)) * 2.0)
 
 
-def test_named_param_in_xgb_params_raises(regression_data: tuple) -> None:
+def test_reserved_xgb_param_raises(regression_data: tuple) -> None:
     X, y = regression_data
-    with pytest.raises(ValueError):
-        XGBDefaultRegressor(xgb_params={"gamma": 1.0}).fit(X, y)
+    with pytest.raises(ValueError, match="set by this class"):
+        XGBDefaultRegressor(objective="reg:absoluteerror").fit(X, y)
+
+
+def test_extra_xgb_params_work_with_sklearn(regression_data: tuple) -> None:
+    X, y = regression_data
+    reg = XGBDefaultRegressor(n_estimators=20, subsample=0.8, colsample_bytree=0.5)
+    assert reg.get_params()["subsample"] == 0.8
+    assert clone(reg).get_params()["colsample_bytree"] == 0.5  # clone keeps them
+
+    reg.set_params(subsample=0.6, reg_alpha=1.0, max_depth=3)  # update, add, and a named one
+    assert reg.xgb_params == {"subsample": 0.6, "colsample_bytree": 0.5, "reg_alpha": 1.0}
+    assert reg.max_depth == 3
+    reg.fit(X, y)
+    assert reg.model_.get_params()["reg_alpha"] == 1.0  # reached XGBoost
+    assert "subsample=0.6" in repr(reg)
+
+    search = GridSearchCV(XGBDefaultRegressor(n_estimators=20), {"subsample": [0.5, 1.0]}, cv=2)
+    search.fit(X, y)
+    assert search.best_params_["subsample"] in {0.5, 1.0}
 
 
 def test_optuna_tuning(binary_data: tuple) -> None:
@@ -158,8 +176,8 @@ def test_multiclass_raises() -> None:
 
 def test_sklearn_compatible(binary_data: tuple) -> None:
     X_train, _, y_train, _ = binary_data
-    clf = clone(XGBDefaultClassifier(criterion="aic", xgb_params={"subsample": 0.9}))
-    assert clf.get_params()["xgb_params"] == {"subsample": 0.9}
+    clf = clone(XGBDefaultClassifier(criterion="aic", subsample=0.9))
+    assert clf.get_params()["subsample"] == 0.9
     scores = cross_val_score(clf, X_train, y_train, cv=3)
     assert scores.mean() > 0.9
 

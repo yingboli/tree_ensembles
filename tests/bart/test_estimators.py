@@ -36,13 +36,36 @@ def test_parameter_draws(fitted_regressor: BartRegressor) -> None:
 
 
 def test_predictions_in_row_batches(
-    fitted_regressor: BartRegressor, regression_data: tuple, monkeypatch: pytest.MonkeyPatch
+    fitted_regressor: BartRegressor, regression_data: tuple
 ) -> None:
     X, _ = regression_data
     whole = fitted_regressor.predict_dist(X[:50])
-    monkeypatch.setattr("tree_ensembles.bart.estimators._CHUNK_ROWS", 7)
-    pd.testing.assert_frame_equal(fitted_regressor.predict_dist(X[:50]), whole)
+    pd.testing.assert_frame_equal(fitted_regressor.predict_dist(X[:50], batch_size=7), whole)
     np.testing.assert_allclose(fitted_regressor.predict(X[:50]), whole["mean"], rtol=1e-5)
+    pd.testing.assert_frame_equal(
+        fitted_regressor.predict_interval(X[:50], batch_size=7),
+        fitted_regressor.predict_interval(X[:50]),
+    )
+    with pytest.raises(ValueError, match="batch_size"):
+        fitted_regressor.predict_dist(X[:5], batch_size=0)
+
+
+def test_n_probe_and_thresholds(regression_data: tuple) -> None:
+    X, y = regression_data
+    params: dict[str, Any] = {
+        "num_trees": 10,
+        "n_save": 20,
+        "n_burn": 20,
+        "num_chains": 2,
+        "show_progress": False,
+    }
+    reg = BartRegressor(**params).fit(X[:200], y[:200], n_probe=5)
+    assert reg.X_probe_.shape == (5, 3)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        table = reg.diagnostics(rhat_max=np.inf, ess_min=0)  # thresholds anyone passes
+    assert table["ok"].all() and len(table) == 4 + 5  # 4 parameter rows + 5 probe rows
+    assert not reg.posterior_summary(ess_min=1e9)["ok"].any()
 
 
 def test_predict_dist_and_intervals(
@@ -116,10 +139,16 @@ def test_multiclass_raises() -> None:
         BartClassifier().fit(np.zeros((6, 1)), [0, 1, 2, 0, 1, 2])
 
 
-def test_managed_param_in_bartz_params_raises(regression_data: tuple) -> None:
+def test_reserved_bartz_param_raises(regression_data: tuple) -> None:
     X, y = regression_data
-    with pytest.raises(ValueError, match="named arguments"):
-        BartRegressor(bartz_params={"num_trees": 10}).fit(X, y)
+    with pytest.raises(ValueError, match="random_state"):
+        BartRegressor(seed=1).fit(X, y)
+
+
+def test_extra_bartz_params_reach_bartz(regression_data: tuple) -> None:
+    X, y = regression_data
+    with pytest.raises(TypeError, match="not_a_bartz_argument"):  # forwarded to bartz.Bart
+        BartRegressor(not_a_bartz_argument=1, show_progress=False).fit(X[:50], y[:50])
 
 
 def test_nan_without_imputation_warns() -> None:
@@ -183,9 +212,12 @@ def test_wrong_number_of_features(fitted_regressor: BartRegressor) -> None:
         fitted_regressor.predict(np.zeros((3, 5)))
 
 
-def test_clone_keeps_params() -> None:
-    model = BartRegressor(num_trees=30, bartz_params={"sparse": None})
-    assert clone(model).get_params()["num_trees"] == 30
+def test_clone_and_set_params_keep_extra_params() -> None:
+    model = BartRegressor(num_trees=30, k=3.0)
+    copy = clone(model)
+    assert copy.get_params()["num_trees"] == 30 and copy.get_params()["k"] == 3.0
+    copy.set_params(k=1.5, sigma_df=10.0, n_save=50)
+    assert copy.bartz_params == {"k": 1.5, "sigma_df": 10.0} and copy.n_save == 50
 
 
 def test_dump_and_load(
@@ -211,8 +243,8 @@ def test_tree_prior_and_thinning_params(regression_data: tuple) -> None:
     reg = BartRegressor(n_skip=3, power=1.0, base=0.5, **params).fit(X[:200], y[:200])
     assert reg.get_params()["n_skip"] == 3
     assert reg.bart_.n_save == 20  # n_skip thins: 20 saved draws from 60 iterations
-    with pytest.raises(ValueError, match="named arguments"):
-        BartRegressor(bartz_params={"power": 1.0}).fit(X, y)
+    with pytest.raises(ValueError, match="set by this class"):
+        BartRegressor(outcome_type="binary").fit(X, y)
 
 
 def test_dataframe_columns_must_match(

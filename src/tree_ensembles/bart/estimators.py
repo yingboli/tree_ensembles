@@ -24,8 +24,9 @@ import jax
 import numpy as np
 import pandas as pd
 from bartz import Bart
-from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
+from sklearn.base import ClassifierMixin, RegressorMixin
 
+from tree_ensembles._base import KwargsEstimator
 from tree_ensembles.bart import trees
 from tree_ensembles.bart.diagnostics import summarize_draws
 from tree_ensembles.bart.intervals import hpdi, quantile_interval
@@ -33,37 +34,21 @@ from tree_ensembles.bart.missing import MissingValueImputer
 
 ArrayLike = pd.DataFrame | np.ndarray
 
-# Parameters this class sets itself; they must not also be passed in `bartz_params`.
-_MANAGED_PARAMS = {
-    "outcome_type",
-    "num_trees",
-    "n_save",
-    "n_burn",
-    "n_skip",
-    "num_chains",
-    "maxdepth",
-    "power",
-    "base",
-    "seed",
-    "printevery",
-    "pbar",
-}
-_N_PROBE = 20  # copies of training rows kept to check convergence of f(x)
-_CHUNK_ROWS = 2_000  # rows per batch for per-row summaries, to bound the memory of the draws
 
-
-def _row_chunks(X: ArrayLike) -> list[ArrayLike]:
-    """Split X into consecutive batches of at most _CHUNK_ROWS rows.
+def _row_chunks(X: ArrayLike, batch_size: int) -> list[ArrayLike]:
+    """Split X into consecutive batches of at most `batch_size` rows.
 
     Only to limit memory: per-row results never depend on the other rows in a batch.
     """
-    starts = range(0, len(X), _CHUNK_ROWS)
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be at least 1, got {batch_size}")
+    starts = range(0, len(X), batch_size)
     if isinstance(X, pd.DataFrame):
-        return [X.iloc[i : i + _CHUNK_ROWS] for i in starts]
-    return [X[i : i + _CHUNK_ROWS] for i in starts]
+        return [X.iloc[i : i + batch_size] for i in starts]
+    return [X[i : i + batch_size] for i in starts]
 
 
-class _BartBase(BaseEstimator):
+class _BartBase(KwargsEstimator):
     """Shared logic of BartRegressor and BartClassifier (use those classes).
 
     Parameters
@@ -107,9 +92,11 @@ class _BartBase(BaseEstimator):
         A feature whose training missing rate is above this gets an extra 0/1 column
         `<name>_missing`, so the trees can split on whether it is missing. 0 adds one for
         every feature with NaN. Ignored when impute_strategy is None.
-    bartz_params : dict, optional
-        Any other argument of bartz.Bart, e.g. {"sparse": SparseConfig(...), "k": 2.0,
-        "sigma_df": 3.0}. Must not repeat a named parameter above (that raises a ValueError).
+    **bartz_params
+        Any other argument of bartz.Bart, e.g. k=2.0, sigma_df=3.0 or
+        sparse=SparseConfig(...). They work with get_params, set_params, clone and
+        GridSearchCV like the named parameters. `outcome_type` (set by the class), `seed`
+        (use random_state) and `printevery` / `pbar` (use show_progress) raise a ValueError.
 
     Attributes
     ----------
@@ -127,9 +114,10 @@ class _BartBase(BaseEstimator):
     fitted_with_names_ : bool
         Whether fit got a DataFrame; if so, later DataFrames must have the same columns in
         the same order.
-    X_probe_ : ndarray of shape (20, p)
-        A copy of 20 random training rows (as given, before imputation) where diagnostics()
-        checks f(x). They are not held out: the model is fit on all training rows.
+    X_probe_ : ndarray of shape (n_probe, p)
+        A copy of n_probe random training rows (fit argument, 20 by default; as given, before
+        imputation) where diagnostics() checks f(x). They are not held out: the model is fit
+        on all training rows.
     classes_ : ndarray of shape (2,)
         Classifier only: the two class labels; predict_proba columns follow this order.
 
@@ -140,6 +128,7 @@ class _BartBase(BaseEstimator):
     bartz bins NaN (see trees.py).
     """
 
+    _kwargs_attr = "bartz_params"  # where KwargsEstimator keeps the **bartz_params
     _outcome_type: str  # bartz outcome_type, set by each subclass
 
     def __init__(
@@ -156,7 +145,7 @@ class _BartBase(BaseEstimator):
         show_progress: bool = True,
         impute_strategy: Literal["median", "mean"] | None = "median",
         missing_indicator_threshold: float = 0.5,
-        bartz_params: dict[str, Any] | None = None,
+        **bartz_params: Any,
     ) -> None:
         self.num_trees = num_trees
         self.n_save = n_save
@@ -219,7 +208,7 @@ class _BartBase(BaseEstimator):
 
     # --- fitting -------------------------------------------------------------
 
-    def fit(self, X: ArrayLike, y: Any) -> "_BartBase":
+    def fit(self, X: ArrayLike, y: Any, n_probe: int = 20) -> "_BartBase":
         """Run the MCMC on all of (X, y).
 
         Parameters
@@ -228,6 +217,10 @@ class _BartBase(BaseEstimator):
             Training features (numeric; encode categories as numbers or dummies).
         y : array-like of shape (n,)
             Training target; two classes for the classifier.
+        n_probe : int, default 20
+            Number of random training rows to keep a copy of (X_probe_), where
+            diagnostics() checks the convergence of f(x). They are not held out: the model
+            is fit on all rows.
 
         Returns
         -------
@@ -240,10 +233,14 @@ class _BartBase(BaseEstimator):
         """
         X_arr = self._check_X(X, fitting=True)
         y_arr = self._prepare_y(y)
-        extra = dict(self.bartz_params or {})
-        repeated = _MANAGED_PARAMS & extra.keys()
-        if repeated:
-            raise ValueError(f"Set {sorted(repeated)} with the named arguments, not bartz_params")
+        # Arguments of bartz.Bart this class sets that are not named arguments above.
+        extra = dict(self.bartz_params)
+        reserved = {"outcome_type", "seed", "printevery", "pbar"} & extra.keys()
+        if reserved:
+            raise ValueError(
+                f"{sorted(reserved)} are set by this class and cannot be passed "
+                "(use random_state for seed, show_progress for printevery / pbar)"
+            )
 
         # Workaround for bartz's NaN binning (see missing.py): impute + indicators.
         self.imputer_: MissingValueImputer | None = None
@@ -277,10 +274,10 @@ class _BartBase(BaseEstimator):
             printevery=100 if self.show_progress else None,
             **extra,
         )
-        # Keep a copy of 20 random training rows (as given) for diagnostics(). They are not
-        # held out: bartz above was fit on all rows; these only say where to evaluate f(x).
+        # Keep a copy of n_probe random training rows (as given) for diagnostics(). They are
+        # not held out: bartz above was fit on all rows; these only say where to check f(x).
         rng = np.random.default_rng(self.random_state)
-        rows = rng.choice(len(X_arr), size=min(_N_PROBE, len(X_arr)), replace=False)
+        rows = rng.choice(len(X_arr), size=min(n_probe, len(X_arr)), replace=False)
         self.X_probe_ = X_arr[np.sort(rows)]
         return self
 
@@ -327,13 +324,16 @@ class _BartBase(BaseEstimator):
         draws = self._draws(X, bartz_kind, seed)
         return draws.reshape(-1, draws.shape[-1])
 
-    def predict_dist(self, X: ArrayLike) -> pd.DataFrame:
+    def predict_dist(self, X: ArrayLike, batch_size: int = 2000) -> pd.DataFrame:
         """Posterior mean and uncertainty for every row of X.
 
         Parameters
         ----------
         X : DataFrame or array of shape (m, p)
             Same columns as in fit.
+        batch_size : int, default 2000
+            Rows processed at a time; memory is about n_draws x batch_size floats. Results
+            do not depend on it.
 
         Returns
         -------
@@ -349,7 +349,7 @@ class _BartBase(BaseEstimator):
         that row's own draws.
         """
         parts = []
-        for chunk in _row_chunks(X):
+        for chunk in _row_chunks(X, batch_size):
             mean_draws = self.predict_samples(chunk, kind="mean")
             parts.append(
                 pd.DataFrame(
@@ -371,6 +371,7 @@ class _BartBase(BaseEstimator):
         prob: float = 0.95,
         kind: Literal["mean", "predictive"] = "mean",
         method: Literal["hpdi", "quantile"] = "hpdi",
+        batch_size: int = 2000,
     ) -> pd.DataFrame:
         """Interval holding `prob` of the posterior draws, for every row of X.
 
@@ -388,6 +389,9 @@ class _BartBase(BaseEstimator):
         method : {"hpdi", "quantile"}, default "hpdi"
             "hpdi": highest posterior density interval (the narrowest one). "quantile":
             equal-tailed interval between the (1 - prob)/2 and (1 + prob)/2 quantiles.
+        batch_size : int, default 2000
+            Rows processed at a time; memory is about n_draws x batch_size floats. Results
+            do not depend on it.
 
         Returns
         -------
@@ -401,7 +405,7 @@ class _BartBase(BaseEstimator):
         """
         interval = {"hpdi": hpdi, "quantile": quantile_interval}[method]
         parts = []
-        for chunk in _row_chunks(X):
+        for chunk in _row_chunks(X, batch_size):
             lower, upper = interval(self.predict_samples(chunk, kind=kind), prob, axis=0)
             parts.append(pd.DataFrame({"lower": lower, "upper": upper}))
         result = pd.concat(parts, ignore_index=True)
@@ -431,7 +435,7 @@ class _BartBase(BaseEstimator):
             mean_tree_depth     average tree depth in each draw, in levels of splits like
                                 XGBoost (0 = single leaf); see forest_summary()
             varprob[<feature>]  probability of splitting on each feature, only with the
-                                sparse prior (bartz_params={"sparse": ...})
+                                sparse prior (sparse=SparseConfig(...))
         Pass any of them to plots.plot_trace / plots.plot_rank.
         """
         draws = {**self._parameter_draws(), **self._tree_size_draws()}
@@ -442,23 +446,33 @@ class _BartBase(BaseEstimator):
                 draws[f"varprob[{name}]"] = varprob[..., j]
         return draws
 
-    def posterior_summary(self, prob: float = 0.95) -> pd.DataFrame:
+    def posterior_summary(
+        self, prob: float = 0.95, rhat_max: float = 1.01, ess_min: float = 400
+    ) -> pd.DataFrame:
         """Summary of every parameter in parameter_draws().
 
         Parameters
         ----------
         prob : float, default 0.95
             Probability inside the HPDI.
+        rhat_max, ess_min : float, default 1.01 and 400
+            Thresholds for the `ok` column (Vehtari et al. 2021).
 
         Returns
         -------
         DataFrame indexed by parameter, with columns mean, sd (posterior sd; its square is
         the posterior variance), hpdi_<prob>_low, hpdi_<prob>_high, rhat, ess_bulk,
-        ess_tail and ok (R-hat < 1.01 and both ESS > 400).
+        ess_tail and ok (R-hat < rhat_max and both ESS > ess_min).
         """
-        return summarize_draws(self.parameter_draws(), prob)
+        return summarize_draws(self.parameter_draws(), prob, rhat_max=rhat_max, ess_min=ess_min)
 
-    def diagnostics(self, X_probe: ArrayLike | None = None, prob: float = 0.95) -> pd.DataFrame:
+    def diagnostics(
+        self,
+        X_probe: ArrayLike | None = None,
+        prob: float = 0.95,
+        rhat_max: float = 1.01,
+        ess_min: float = 400,
+    ) -> pd.DataFrame:
         """MCMC convergence checks.
 
         Covers the parameters (as in posterior_summary), the share of trees with an accepted
@@ -468,10 +482,13 @@ class _BartBase(BaseEstimator):
         Parameters
         ----------
         X_probe : DataFrame or array of shape (k, p), optional
-            Rows where f(x) is checked, e.g. some test rows. Default: X_probe_, a copy of 20
-            random training rows kept when fitting (the model itself is fit on all rows).
+            Rows where f(x) is checked, e.g. some test rows. Default: X_probe_, a copy of
+            random training rows kept when fitting (n_probe in fit, 20 by default; the model
+            itself is fit on all rows).
         prob : float, default 0.95
             Probability inside the HPDI columns.
+        rhat_max, ess_min : float, default 1.01 and 400
+            A row is flagged when R-hat >= rhat_max or bulk/tail ESS <= ess_min.
 
         Returns
         -------
@@ -481,8 +498,8 @@ class _BartBase(BaseEstimator):
         Warns
         -----
         UserWarning
-            Listing the rows that fail R-hat < 1.01 or ESS > 400 (Vehtari et al. 2021). If
-            so, run longer (n_burn / n_save, n_skip) or more chains.
+            Listing the rows that fail R-hat < rhat_max or ESS > ess_min (Vehtari et al.
+            2021). If so, run longer (n_burn / n_save, n_skip) or more chains.
         """
         n_save = self.bart_.n_save
         accept = np.asarray(self.bart_.accept).reshape(self.num_chains, -1)[:, -n_save:]
@@ -491,7 +508,7 @@ class _BartBase(BaseEstimator):
         mean_draws = self._draws(X_check, "mean_samples")
         for i in range(mean_draws.shape[-1]):
             draws[f"f(x_probe[{i}])"] = mean_draws[..., i]
-        table = summarize_draws(draws, prob)
+        table = summarize_draws(draws, prob, rhat_max=rhat_max, ess_min=ess_min)
         failed = table.index[~table["ok"]].tolist()
         if failed:
             warnings.warn(f"Possible lack of convergence for: {failed}", stacklevel=2)
@@ -713,6 +730,7 @@ class BartClassifier(ClassifierMixin, _BartBase):
         prob: float = 0.95,
         kind: Literal["mean", "predictive"] = "mean",
         method: Literal["hpdi", "quantile"] = "hpdi",
+        batch_size: int = 2000,
     ) -> pd.DataFrame:
         """Credible interval of p(x) = P(y = 1 | x) for every row of X.
 
@@ -729,6 +747,8 @@ class BartClassifier(ClassifierMixin, _BartBase):
             Anything else raises a ValueError.
         method : {"hpdi", "quantile"}, default "hpdi"
             Narrowest interval, or equal-tailed quantiles.
+        batch_size : int, default 2000
+            Rows processed at a time, to bound memory.
 
         Returns
         -------
@@ -736,4 +756,6 @@ class BartClassifier(ClassifierMixin, _BartBase):
         """
         if kind != "mean":
             raise ValueError("BartClassifier only supports kind='mean' (an interval for p(x))")
-        return super().predict_interval(X, prob=prob, kind=kind, method=method)
+        return super().predict_interval(
+            X, prob=prob, kind=kind, method=method, batch_size=batch_size
+        )

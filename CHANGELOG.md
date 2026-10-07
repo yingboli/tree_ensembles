@@ -6,6 +6,17 @@ All notable changes to this project. Format based on
 
 ## [Unreleased]
 
+### Changed
+
+- Extra XGBoost / bartz parameters are plain keyword arguments (`**xgb_params`,
+  `**bartz_params`) instead of a dict, e.g. `XGBDefaultRegressor(subsample=0.8)` or
+  `BartRegressor(k=3.0)`; they work with `get_params`, `set_params`, `clone` and
+  `GridSearchCV`. Replace `xgb_params={"subsample": 0.8}` with `subsample=0.8`.
+- Optuna samples `learning_rate` on a log scale (`log=True`) within [0.05, 0.3].
+- Module-level settings became arguments: `fit(..., n_probe=20)` for the rows checked by
+  `diagnostics()`, `batch_size=2000` in `predict_dist` / `predict_interval`, and
+  `rhat_max=1.01`, `ess_min=400` in `summarize_draws`, `posterior_summary` and `diagnostics`.
+
 ## [0.3.0] - 2026-10-05
 
 ### Added
