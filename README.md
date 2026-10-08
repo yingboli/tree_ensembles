@@ -211,7 +211,7 @@ plot_variable_usage`.
   `base / (1 + d) ** power`) and `n_skip` (keep every n-th draw) are named arguments.
 - **Other bartz options** (`sparse`, `k`, `sigma_df`, ...) are keyword arguments, e.g.
   `BartRegressor(k=3.0)`. Sample weights and offsets are not supported yet.
-- **Saving:** `bart.dump("folder")` / `BartRegressor.load("folder")` use bartz's own format,
+- **Saving:** `bart.dump("folder")` / `BartRegressor().load("folder")` (like XGBoost's `load_model`) use bartz's own format,
   which depends on the bartz/JAX versions: good for caching, not for archiving. With many trees
   the file is large (about 4 GB for 10,000 trees x 1,000 draws).
 

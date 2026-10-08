@@ -309,3 +309,12 @@ def test_tuning_with_weights_and_offset(offset_data: tuple) -> None:
         base_margin_valid=offset[2000:],
     )
     assert reg.optuna_best_params_ is not None
+
+
+def test_estimator_pickled_by_version_0_3_still_works(regression_data: tuple) -> None:
+    """Version 0.3.0 stored xgb_params=None when no extra parameters were given."""
+    X, y = regression_data
+    reg = XGBDefaultRegressor(n_estimators=5)
+    reg.xgb_params = None  # type: ignore[assignment]  # what a 0.3.0 pickle holds
+    assert "n_estimators=5" in repr(reg)
+    assert clone(reg).fit(X, y).n_trees_ <= 5

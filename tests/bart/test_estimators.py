@@ -225,7 +225,7 @@ def test_dump_and_load(
 ) -> None:
     X, _ = regression_data
     fitted_regressor.dump(tmp_path / "model")
-    loaded = BartRegressor.load(tmp_path / "model")
+    loaded = BartRegressor().load(tmp_path / "model")
     assert isinstance(loaded, BartRegressor)
     np.testing.assert_allclose(loaded.predict(X[:10]), fitted_regressor.predict(X[:10]))
     pd.testing.assert_frame_equal(loaded.posterior_summary(), fitted_regressor.posterior_summary())
@@ -270,3 +270,54 @@ def test_array_fit_accepts_any_dataframe_names() -> None:
     }
     reg = BartRegressor(**params).fit(X, X[:, 0])
     reg.predict(pd.DataFrame(X, columns=["u", "v"]))  # fitted without names: nothing to check
+
+
+def test_model_saved_by_version_0_3_still_works(
+    fitted_regressor: BartRegressor, regression_data: tuple, tmp_path: Path
+) -> None:
+    """Version 0.3.0 stored bartz_params=None when no extra parameters were given."""
+    X, y = regression_data
+    fitted_regressor.dump(tmp_path / "model")
+    loaded = BartRegressor().load(tmp_path / "model")
+    loaded.bartz_params = None  # type: ignore[assignment]  # what a 0.3.0 dump holds
+    assert "num_trees=50" in repr(loaded)
+    assert "k" not in loaded.get_params()
+    assert clone(loaded).get_params()["num_trees"] == 50
+    loaded.set_params(n_save=20, n_burn=20).fit(X[:100], y[:100])  # refitting works too
+
+
+def test_load_fills_the_estimator_in_place(
+    fitted_regressor: BartRegressor,
+    fitted_classifier: BartClassifier,
+    regression_data: tuple,
+    tmp_path: Path,
+) -> None:
+    X, _ = regression_data
+    fitted_regressor.dump(tmp_path / "reg")
+    reg = BartRegressor(num_trees=999)  # settings are replaced by the dumped ones
+    returned = reg.load(tmp_path / "reg")
+    assert returned is reg and reg.num_trees == 50
+    np.testing.assert_allclose(reg.predict(X[:5]), fitted_regressor.predict(X[:5]))
+
+    fitted_classifier.dump(tmp_path / "clf")
+    with pytest.raises(TypeError, match="BartClassifier"):
+        BartRegressor().load(tmp_path / "clf")
+    with pytest.raises(FileNotFoundError, match="No model dumped"):
+        BartRegressor().load(tmp_path / "empty")
+
+
+def test_unfitted_model_says_not_fitted(regression_data: tuple, tmp_path: Path) -> None:
+    from sklearn.exceptions import NotFittedError
+
+    X, _ = regression_data
+    reg = BartRegressor()
+    for call in (
+        lambda: reg.predict(X[:3]),
+        lambda: BartClassifier().predict_proba(X[:3]),
+        lambda: reg.dump(tmp_path / "m"),
+        reg.posterior_summary,
+        reg.forest_summary,
+        lambda: reg.trees_to_dataframe(draws=0),
+    ):
+        with pytest.raises(NotFittedError):
+            call()

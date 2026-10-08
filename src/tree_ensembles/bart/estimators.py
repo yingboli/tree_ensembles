@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 from bartz import Bart
 from sklearn.base import ClassifierMixin, RegressorMixin
+from sklearn.utils.validation import check_is_fitted
 
 from tree_ensembles._base import KwargsEstimator
 from tree_ensembles.bart import trees
@@ -184,6 +185,8 @@ class _BartBase(KwargsEstimator):
         When fitting, remember the feature names (x0, x1, ... for arrays). Afterwards, a
         DataFrame must have the same columns in the same order as the training DataFrame.
         """
+        if not fitting:
+            check_is_fitted(self, "bart_")  # a clear NotFittedError instead of AttributeError
         columns = [str(c) for c in X.columns] if isinstance(X, pd.DataFrame) else None
         if fitting:
             self.fitted_with_names_ = columns is not None
@@ -235,7 +238,7 @@ class _BartBase(KwargsEstimator):
         X_arr = self._check_X(X, fitting=True)
         y_arr = self._prepare_y(y)
         # Arguments of bartz.Bart this class sets that are not named arguments above.
-        extra = dict(self.bartz_params)
+        extra = dict(self._extra_kwargs())
         reserved = {"outcome_type", "seed", "printevery", "pbar"} & extra.keys()
         if reserved:
             raise ValueError(
@@ -439,6 +442,7 @@ class _BartBase(KwargsEstimator):
                                 sparse prior (sparse=SparseConfig(...))
         Pass any of them to plots.plot_trace / plots.plot_rank.
         """
+        check_is_fitted(self, "bart_")
         draws = {**self._parameter_draws(), **self._tree_size_draws()}
         if self.bart_._main_trace.varprob is not None:  # sparse (variable selection) prior
             shape = (self.num_chains, self.bart_.n_save, len(self.model_feature_names_))
@@ -532,6 +536,7 @@ class _BartBase(KwargsEstimator):
         same as an XGBoost depth of 3, and only the bartz `maxdepth` setting is shifted by one
         (bartz maxdepth = XGBoost max_depth + 1).
         """
+        check_is_fitted(self, "bart_")
         return trees.forest_summary(self.bart_, self.model_feature_names_)
 
     def split_points(self) -> pd.DataFrame:
@@ -543,6 +548,7 @@ class _BartBase(KwargsEstimator):
         count. A NaN cutpoint marks a split caused by NaN in X: useless (every row goes
         left) or an "is missing" split, depending on the feature (see trees.py).
         """
+        check_is_fitted(self, "bart_")
         return trees.split_points(self.bart_, self.model_feature_names_)
 
     def trees_to_dataframe(
@@ -573,6 +579,7 @@ class _BartBase(KwargsEstimator):
         When NaN are imputed before fitting (impute_strategy, the default), no NaN ever
         reaches the trees, so `missing` is None: a missing direction would mean nothing.
         """
+        check_is_fitted(self, "bart_")
         X_model = None if X is None else self._model_X(self._check_X(X))
         # `trees` (the argument) hides the trees module here, hence the _trees_table alias
         table = _trees_table(self.bart_, self.model_feature_names_, chains, draws, trees, X_model)
@@ -595,6 +602,7 @@ class _BartBase(KwargsEstimator):
             Nested if/else rules. Leaf values are contributions to f(x) (to the probit
             latent value for the classifier); f(x) is the sum over all trees plus an offset.
         """
+        check_is_fitted(self, "bart_")
         return trees.format_tree(self.bart_, self.model_feature_names_, chain, draw, tree)
 
     # --- dump / load ---------------------------------------------------------
@@ -603,7 +611,7 @@ class _BartBase(KwargsEstimator):
         """Write the fitted model to a folder.
 
         The folder gets bart.pkl (bartz's own dump of the MCMC trace) and estimator.pkl
-        (everything else). Reload with `load`.
+        (everything else). Reload with `BartRegressor().load(path)` (or BartClassifier).
 
         Parameters
         ----------
@@ -616,6 +624,7 @@ class _BartBase(KwargsEstimator):
         not for long-term archival. Files are large with many trees and draws (about 4 GB
         for 10,000 trees x 1,000 draws).
         """
+        check_is_fitted(self, "bart_")
         folder = Path(path)
         folder.mkdir(parents=True, exist_ok=True)
         self.bart_.dump(folder / "bart.pkl")
@@ -623,9 +632,11 @@ class _BartBase(KwargsEstimator):
         with (folder / "estimator.pkl").open("wb") as f:
             pickle.dump((type(self), state), f)
 
-    @staticmethod
-    def load(path: str | Path) -> "_BartBase":
-        """Load a model written with `dump`.
+    def load(self, path: str | Path) -> "_BartBase":
+        """Load a model written with `dump` into this estimator, like XGBoost's load_model.
+
+        Everything is restored: the fitted model and all settings (they replace this
+        estimator's own), the imputer and the feature names.
 
         Parameters
         ----------
@@ -634,16 +645,30 @@ class _BartBase(KwargsEstimator):
 
         Returns
         -------
-        BartRegressor or BartClassifier
-            The same class that was dumped.
+        self, now fitted; so both `reg.load(path)` and `reg = BartRegressor().load(path)` work.
+
+        Raises
+        ------
+        FileNotFoundError
+            If the folder has no dump in it.
+        TypeError
+            If the folder holds the other class (e.g. a BartClassifier loaded into a
+            BartRegressor).
         """
         folder = Path(path)
+        missing = [name for name in ("estimator.pkl", "bart.pkl") if not (folder / name).exists()]
+        if missing:
+            raise FileNotFoundError(f"No model dumped in {folder}: {missing} not found")
         with (folder / "estimator.pkl").open("rb") as f:
             cls, state = pickle.load(f)
-        model = cls.__new__(cls)
-        model.__dict__.update(state)
-        model.bart_ = Bart.load(folder / "bart.pkl")
-        return model
+        if cls is not type(self):
+            raise TypeError(
+                f"{folder} holds a {cls.__name__}; load it with {cls.__name__}().load(...)"
+            )
+        self.__dict__.clear()  # drop anything from an earlier fit
+        self.__dict__.update(state)
+        self.bart_ = Bart.load(folder / "bart.pkl")
+        return self
 
 
 def _shared_doc(cls: type) -> str:
@@ -698,7 +723,8 @@ class BartRegressor(RegressorMixin, _BartBase):
         -------
         ndarray of shape (m,)
         """
-        return np.asarray(self.bart_.predict(self._model_X(self._check_X(X)).T, kind="mean"))
+        X_model = self._model_X(self._check_X(X))  # checks it is fitted first
+        return np.asarray(self.bart_.predict(X_model.T, kind="mean"))
 
 
 class BartClassifier(ClassifierMixin, _BartBase):
@@ -743,7 +769,8 @@ class BartClassifier(ClassifierMixin, _BartBase):
             Columns P(classes_[0]) and P(classes_[1]); the second is the posterior mean
             of p(x) = Phi(f(x)).
         """
-        p = np.asarray(self.bart_.predict(self._model_X(self._check_X(X)).T, kind="mean"))
+        X_model = self._model_X(self._check_X(X))  # checks it is fitted first
+        p = np.asarray(self.bart_.predict(X_model.T, kind="mean"))
         return np.column_stack([1 - p, p])
 
     def predict(self, X: ArrayLike) -> np.ndarray:

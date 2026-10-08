@@ -251,7 +251,7 @@ class _XGBDefaultBase(KwargsEstimator):
             )
 
         # XGBoost parameters this class sets that are not named arguments above.
-        extra = dict(self.xgb_params)
+        extra = dict(self._extra_kwargs())
         reserved = {"objective", "callbacks"} & extra.keys()
         if reserved:
             raise ValueError(f"{sorted(reserved)} are set by this class and cannot be passed")

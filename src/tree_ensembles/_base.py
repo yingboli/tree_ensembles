@@ -18,7 +18,12 @@ class KwargsEstimator(BaseEstimator):
     _kwargs_attr: str  # name of the dict attribute holding the extra keyword arguments
 
     def _extra_kwargs(self) -> dict[str, Any]:
-        return getattr(self, self._kwargs_attr)
+        """The extra keyword arguments as a dict.
+
+        Models saved with version 0.3.0 or earlier stored None when there were none
+        (they took a dict argument then), so None is read as {}.
+        """
+        return getattr(self, self._kwargs_attr, None) or {}
 
     def get_params(self, deep: bool = True) -> dict[str, Any]:
         """Named parameters plus the extra keyword arguments."""

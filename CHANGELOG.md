@@ -6,6 +6,17 @@ All notable changes to this project. Format based on
 
 ## [Unreleased]
 
+- `load` fills the estimator it is called on, like XGBoost's `load_model`:
+  `reg = BartRegressor(); reg.load(folder)` or `reg = BartRegressor().load(folder)`. Breaking:
+  `BartRegressor.load(folder)` becomes `BartRegressor().load(folder)`. Loading the other class or
+  an empty folder raises a clear error; using an unfitted model raises `NotFittedError`.
+
+### Fixed
+
+- Models saved or pickled with 0.3.0 without extra parameters (stored as `bartz_params=None` /
+  `xgb_params=None`) failed in `repr`, `get_params`, `clone` and refitting after loading; `None`
+  is now read as "no extra parameters".
+
 ### Added
 
 - `trees_to_dataframe` for BART (`BartRegressor` / `BartClassifier`) and XGBoost
