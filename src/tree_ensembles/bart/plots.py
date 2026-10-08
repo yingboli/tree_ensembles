@@ -35,6 +35,9 @@ def plot_trace(draws: np.ndarray, name: str = "") -> "Figure":
     Returns
     -------
     matplotlib Figure
+        In Jupyter, end the line with ";" (or assign the result, e.g. fig = ...) so the
+        figure is shown once: otherwise it is drawn both by matplotlib and as the cell's
+        returned value. Keep the Figure to save it, e.g. fig.savefig("trees.pdf").
     """
     x = np.atleast_2d(draws)
     fig, (trace, density) = _subplots(2)
@@ -65,6 +68,9 @@ def plot_rank(draws: np.ndarray, name: str = "", bins: int = 20) -> "Figure":
     Returns
     -------
     matplotlib Figure
+        In Jupyter, end the line with ";" (or assign the result, e.g. fig = ...) so the
+        figure is shown once: otherwise it is drawn both by matplotlib and as the cell's
+        returned value. Keep the Figure to save it, e.g. fig.savefig("trees.pdf").
     """
     x = np.atleast_2d(draws)
     ranks = rankdata(x).reshape(x.shape)
@@ -88,6 +94,9 @@ def plot_tree_sizes(summary: ForestSummary) -> "Figure":
     Returns
     -------
     matplotlib Figure
+        In Jupyter, end the line with ";" (or assign the result, e.g. fig = ...) so the
+        figure is shown once: otherwise it is drawn both by matplotlib and as the cell's
+        returned value. Keep the Figure to save it, e.g. fig.savefig("trees.pdf").
 
     Notes
     -----
@@ -122,6 +131,9 @@ def plot_variable_usage(summary: ForestSummary, top: int = 20) -> "Figure":
     Returns
     -------
     matplotlib Figure
+        In Jupyter, end the line with ";" (or assign the result, e.g. fig = ...) so the
+        figure is shown once: otherwise it is drawn both by matplotlib and as the cell's
+        returned value. Keep the Figure to save it, e.g. fig.savefig("trees.pdf").
     """
     usage = summary.variable_usage().head(top).iloc[::-1]  # most used at the top
     fig, (ax,) = _subplots(1, width=6, height=0.3 * len(usage) + 1)

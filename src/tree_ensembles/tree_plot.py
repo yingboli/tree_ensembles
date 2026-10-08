@@ -107,6 +107,9 @@ def plot_tree(
     Returns
     -------
     matplotlib Figure
+        In Jupyter, end the line with ";" (or assign the result, e.g. fig = ...) so the
+        figure is shown once: otherwise it is drawn both by matplotlib and as the cell's
+        returned value. Keep the Figure to save it, e.g. fig.savefig("trees.pdf").
 
     Notes
     -----
@@ -194,6 +197,9 @@ def plot_trees(
     Returns
     -------
     matplotlib Figure
+        In Jupyter, end the line with ";" (or assign the result, e.g. fig = ...) so the
+        figure is shown once: otherwise it is drawn both by matplotlib and as the cell's
+        returned value. Keep the Figure to save it, e.g. fig.savefig("trees.pdf").
     """
     import matplotlib.pyplot as plt
 
