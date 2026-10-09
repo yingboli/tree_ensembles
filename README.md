@@ -168,6 +168,8 @@ print(forest.depth_distribution())  # share of trees by depth (0 = single leaf)
 print(forest.variable_usage())  # splits per feature
 print(bart.split_points().head())  # most used cut values
 print(bart.format_tree(chain=0, draw=0, tree=0))  # one tree, readable
+print(bart.variable_importance(X_test))  # split / row / gain shares with 95% HPDI
+print(bart.interactions().head())  # feature pairs splitting as parent and child
 ```
 
 ### Trees as tables and plots (BART and XGBoost)
@@ -199,6 +201,24 @@ plot_variable_usage`.
 - **Convergence:** `diagnostics()` warns when R-hat > 1.01 or ESS < 400 (Vehtari et al. 2021).
   Use several chains (default 4); in BART, sigma and the tree sizes often mix slowly, so check
   them before trusting intervals. Fix with a longer `n_burn` / `n_save` or more chains.
+  It also reports `leaf_fill` (mean leaves per tree / most allowed by `maxdepth`, bartz's
+  "leaves 2.6/32") and warns above 0.25: BART wants many small trees, so use more `num_trees`.
+- **Variable importance:** `variable_importance(X)` gives, per feature and with a 95% HPDI
+  from the posterior draws: `split_share` (share of splits), `inclusion_prob`, `row_share`
+  (splits weighted by the rows they divide, like XGBoost's cover) and `gain_share` (share of the
+  fitted function's variation from splits on the feature, computed from the trees' predictions,
+  not from y). With the sparse (DART) prior, `BartRegressor(sparse=SparseConfig())`, it adds
+  the posterior splitting probability `split_prob`.
+- **Categorical features:** BART has no categorical splits: bartz splits every column at numeric
+  cutpoints, so integer codes would be split into ranges of codes, whose order usually means
+  nothing (binary 0/1 features are fine). By default (`order_categories=True`), each level of a pandas
+  `category` column is replaced by its partially pooled mean of y (a normal
+  hierarchical model with empirical Bayes variances, `PooledMeanEncoder`), which orders similar
+  levels next to each other. With `order_categories=False` they raise an error; encode them
+  yourself instead (e.g. one-hot). XGBoost handles pandas
+  `category` columns natively (`enable_categorical=True`). Ordering by
+  residuals instead of y (once, or at every split, which needs bartz changes) is discussed in
+  `bart/categories.py`.
 - **Missing values:** handled for you. bartz bins NaN poorly (every NaN counts as a distinct
   value when choosing cutpoints, crowding out real cutpoints and creating splits that do
   nothing; reported upstream). Until that is fixed, the BART estimators median-impute NaN
@@ -235,7 +255,9 @@ src/tree_ensembles/
     intervals.py     hpdi, quantile_interval
     diagnostics.py   split_rhat, ess_bulk, ess_tail, summarize_draws
     missing.py       MissingValueImputer (NaN workaround for bartz)
+    categories.py    PooledMeanEncoder (order categories by pooled mean y)
     trees.py         forest summaries (the only code reading bartz internals)
+    importance.py    variable_importance, interactions
     plots.py         trace, rank, tree-size and variable-usage plots
   tree_plot.py       plot_tree, plot_trees (BART and XGBoost trees)
 tests/

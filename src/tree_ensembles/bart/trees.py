@@ -485,11 +485,8 @@ def trees_to_dataframe(
     slot = np.minimum(node, half - 1)
     feat = var[c, d, t, slot].astype(int)
     s = split[c, d, t, slot].astype(int)
-    longest = max(len(cuts) for cuts in arrays.cutpoints)
-    cut_table = np.full((len(arrays.cutpoints), max(longest, 1)), np.nan)
-    for j, cuts in enumerate(arrays.cutpoints):
-        cut_table[j, : len(cuts)] = cuts
-    cutpoint = np.where(is_leaf, np.nan, cut_table[feat, np.maximum(s - 1, 0)])
+    cuts = cut_table(arrays)
+    cutpoint = np.where(is_leaf, np.nan, cuts[feat, np.maximum(s - 1, 0)])
     missing_right = arrays.nan_bin[feat] >= s
     names = np.asarray(feature_names, dtype=object)[feat]
     condition = [
@@ -559,3 +556,26 @@ def _num_rows(arrays: TreeArrays, X: np.ndarray, table: pd.DataFrame) -> np.ndar
             np.add.at(per_node, node[active], 1)
         counts[rows] = per_node[table["node"].to_numpy()[rows]]
     return counts
+
+
+def cut_table(arrays: TreeArrays) -> np.ndarray:
+    """Cut values as a (feature, split index - 1) array, NaN-padded to the longest feature."""
+    longest = max(max(len(cuts) for cuts in arrays.cutpoints), 1)
+    table = np.full((len(arrays.cutpoints), longest), np.nan)
+    for j, cuts in enumerate(arrays.cutpoints):
+        table[j, : len(cuts)] = cuts
+    return table
+
+
+def split_probabilities(bart: Bart) -> np.ndarray | None:
+    """Posterior draws of each feature's splitting probability under the sparse (DART) prior.
+
+    Returns
+    -------
+    ndarray of shape (chain, draw, feature), or None when the sparse prior is off.
+    """
+    trace = bart._main_trace
+    if trace.varprob is None:
+        return None
+    varprob = np.asarray(trace.varprob)
+    return varprob if trace.has_chains else varprob[None]

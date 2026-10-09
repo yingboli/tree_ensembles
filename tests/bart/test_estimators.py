@@ -64,7 +64,9 @@ def test_n_probe_and_thresholds(regression_data: tuple) -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         table = reg.diagnostics(rhat_max=np.inf, ess_min=0)  # thresholds anyone passes
-    assert table["ok"].all() and len(table) == 4 + 5  # 4 parameter rows + 5 probe rows
+    # 3 parameters, accept_rate, leaf_fill, 2 f(x) rows
+    assert table["ok"].all() and len(table) == 5 + 2
+    assert table.attrs["f_ok_share"] == 1.0
     assert not reg.posterior_summary(ess_min=1e9)["ok"].any()
 
 
@@ -100,9 +102,36 @@ def test_draw_shapes_follow_chain_order(
 def test_diagnostics_table(fitted_regressor: BartRegressor) -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # short test chains do not pass the thresholds
-        table = fitted_regressor.diagnostics()
+        table = fitted_regressor.diagnostics(per_point=True)
+        summary = fitted_regressor.diagnostics()
     assert {"sigma", "accept_rate", "f(x_probe[0])", "f(x_probe[19])"} <= set(table.index)
-    assert np.isfinite(table[["rhat", "ess_bulk", "ess_tail"]].to_numpy()).all()
+    points = table.loc[[f"f(x_probe[{i}])" for i in range(20)]]
+    worst = summary.loc["f(x_probe): worst"]
+    assert worst["rhat"] == pytest.approx(points["rhat"].max())
+    assert worst["ess_bulk"] == pytest.approx(points["ess_bulk"].min())
+    assert summary.loc["f(x_probe): median", "rhat"] == pytest.approx(points["rhat"].median())
+    assert summary.attrs["f_ok_share"] == pytest.approx(points["ok"].astype(bool).mean())
+    assert not any(name.startswith("f(x_probe[") for name in summary.index)
+    checked = table.drop(index=["accept_rate", "leaf_fill"])
+    assert np.isfinite(checked[["rhat", "ess_bulk", "ess_tail"]].to_numpy(dtype=float)).all()
+    # the acceptance rate and leaf fill are only reported as averages, not checked
+    reported = table.loc[["accept_rate", "leaf_fill"]]
+    assert ((reported["mean"] > 0) & (reported["mean"] < 1)).all()
+    assert reported["rhat"].isna().all() and reported["ok"].isna().all()
+    # leaf_fill is bartz's "leaves 2.6/32": mean leaves per tree over 2 ** (maxdepth - 1)
+    assert table.attrs["max_leaves"] == 2 ** (fitted_regressor.maxdepth - 1)
+    mean_leaves = table.loc["mean_tree_leaves", "mean"]
+    assert table.loc["leaf_fill", "mean"] == pytest.approx(mean_leaves / table.attrs["max_leaves"])
+
+
+def test_diagnostics_warns_for_large_trees(fitted_regressor: BartRegressor) -> None:
+    passing = {"rhat_max": np.inf, "ess_min": 0}  # no convergence warning
+    with pytest.warns(UserWarning, match="Large trees"):
+        fitted_regressor.diagnostics(leaf_fill_max=0.0, **passing)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        fitted_regressor.diagnostics(leaf_fill_max=1.0, **passing)
+    assert not any("Large trees" in str(w.message) for w in caught)
 
 
 def test_diagnostics_warns_for_short_chains(fitted_regressor: BartRegressor) -> None:
@@ -192,7 +221,7 @@ def test_imputation_is_the_default(nan_data: tuple) -> None:
     # only c is missing more than 50% of the time, so only c gets an indicator
     assert reg.model_feature_names_ == ["a", "b", "c", "c_missing"]
     assert reg.feature_names_in_ == ["a", "b", "c"]
-    assert np.isnan(reg.X_probe_).any()  # probe rows are kept as given
+    assert np.isnan(np.asarray(reg.X_probe_, dtype=float)).any()  # probe rows kept as given
 
     pred = reg.predict(X)  # NaN in new rows are imputed the same way
     assert np.isfinite(pred).all()
@@ -201,7 +230,7 @@ def test_imputation_is_the_default(nan_data: tuple) -> None:
     assert reg.split_points()["cutpoint"].notna().all()  # no NaN cutpoints any more
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # tiny test chains do not converge
-        assert reg.diagnostics().shape[0] > 20
+        assert "f(x_probe): worst" in reg.diagnostics().index
 
     zero = BartRegressor(missing_indicator_threshold=0.0, **params).fit(X, y)
     assert zero.model_feature_names_ == ["a", "b", "c", "b_missing", "c_missing"]

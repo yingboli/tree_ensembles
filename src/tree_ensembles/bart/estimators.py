@@ -28,13 +28,44 @@ from sklearn.base import ClassifierMixin, RegressorMixin
 from sklearn.utils.validation import check_is_fitted
 
 from tree_ensembles._base import KwargsEstimator
-from tree_ensembles.bart import trees
+from tree_ensembles.bart import importance, trees
+from tree_ensembles.bart.categories import PooledMeanEncoder, categorical_columns
 from tree_ensembles.bart.diagnostics import summarize_draws
 from tree_ensembles.bart.intervals import hpdi, quantile_interval
 from tree_ensembles.bart.missing import MissingValueImputer
 from tree_ensembles.bart.trees import trees_to_dataframe as _trees_table
 
 ArrayLike = pd.DataFrame | np.ndarray
+
+
+def _raise_categorical(columns: list[str]) -> None:
+    """Refuse pandas `category` columns when they are not encoded."""
+    raise TypeError(
+        f"X has categorical columns {columns}, which BART does not support (bartz splits "
+        "every column as numbers). Set order_categories=True to order the levels by a "
+        "partially pooled mean of y, or encode them yourself (e.g. one-hot)."
+    )
+
+
+def _summarize_points(points: pd.DataFrame, rhat_max: float, ess_min: float) -> pd.DataFrame:
+    """Two rows summarizing the convergence of f(x) over the probe rows: median and worst."""
+    median_rhat = float(points["rhat"].median())
+    median_bulk, median_tail = (
+        float(points["ess_bulk"].median()),
+        float(points["ess_tail"].median()),
+    )
+    return pd.DataFrame(
+        {
+            "rhat": [median_rhat, float(points["rhat"].max())],
+            "ess_bulk": [median_bulk, float(points["ess_bulk"].min())],
+            "ess_tail": [median_tail, float(points["ess_tail"].min())],
+            "ok": [
+                median_rhat < rhat_max and min(median_bulk, median_tail) > ess_min,
+                bool(points["ok"].all()),
+            ],
+        },
+        index=["f(x_probe): median", "f(x_probe): worst"],
+    )
 
 
 def _row_chunks(X: ArrayLike, batch_size: int) -> list[ArrayLike]:
@@ -94,6 +125,15 @@ class _BartBase(KwargsEstimator):
         A feature whose training missing rate is above this gets an extra 0/1 column
         `<name>_missing`, so the trees can split on whether it is missing. 0 adds one for
         every feature with NaN. Ignored when impute_strategy is None.
+    order_categories : bool, default True
+        BART has no categorical features: bartz splits every column at numeric cutpoints.
+        With True, each level of a pandas `category` column is replaced by its partially
+        pooled (empirical Bayes) mean of y, learned in fit from the training rows only,
+        which orders similar levels next to each other (see categories.PooledMeanEncoder).
+        It is one global order (no level-specific interactions) and uses y for the encoding
+        as well as the fit. With False, `category` columns raise a TypeError (in fit and
+        predict); encode them yourself (e.g. one-hot) instead. Integer codes in numeric
+        columns are not detected and are split as numbers.
     **bartz_params
         Any other argument of bartz.Bart, e.g. k=2.0, sigma_df=3.0 or
         sparse=SparseConfig(...). They work with get_params, set_params, clone and
@@ -108,6 +148,8 @@ class _BartBase(KwargsEstimator):
         Column names of the training DataFrame, or x0, x1, ... for an array.
     n_features_in_ : int
         Number of features in X.
+    category_encoder_ : PooledMeanEncoder or None
+        The fitted category ordering (None when X has no pandas `category` columns).
     imputer_ : MissingValueImputer or None
         The fitted missing-value step (None when impute_strategy is None).
     model_feature_names_ : list of str
@@ -116,10 +158,10 @@ class _BartBase(KwargsEstimator):
     fitted_with_names_ : bool
         Whether fit got a DataFrame; if so, later DataFrames must have the same columns in
         the same order.
-    X_probe_ : ndarray of shape (n_probe, p)
-        A copy of n_probe random training rows (fit argument, 20 by default; as given, before
-        imputation) where diagnostics() checks f(x). They are not held out: the model is fit
-        on all training rows.
+    X_probe_ : DataFrame or ndarray with n_probe rows
+        A copy of n_probe random training rows (fit argument, 20 by default), as given to fit
+        (before category encoding and imputation), where diagnostics() checks f(x). They are
+        not held out: the model is fit on all training rows.
     classes_ : ndarray of shape (2,)
         Classifier only: the two class labels; predict_proba columns follow this order.
 
@@ -147,6 +189,7 @@ class _BartBase(KwargsEstimator):
         show_progress: bool = True,
         impute_strategy: Literal["median", "mean"] | None = "median",
         missing_indicator_threshold: float = 0.5,
+        order_categories: bool = True,
         **bartz_params: Any,
     ) -> None:
         self.num_trees = num_trees
@@ -161,6 +204,7 @@ class _BartBase(KwargsEstimator):
         self.show_progress = show_progress
         self.impute_strategy = impute_strategy
         self.missing_indicator_threshold = missing_indicator_threshold
+        self.order_categories = order_categories
         self.bartz_params = bartz_params
 
     # --- hooks implemented by the subclasses ---------------------------------
@@ -201,10 +245,29 @@ class _BartBase(KwargsEstimator):
                     f"missing: {missing}, unexpected: {extra}"
                     + ("" if missing or extra else " (same names, different order)")
                 )
+        encoder = getattr(self, "category_encoder_", None)  # None for models from older versions
+        if not fitting and encoder is not None:
+            if not isinstance(X, pd.DataFrame):
+                raise ValueError("This model encodes categorical columns: pass X as a DataFrame")
+            X = encoder.transform(X)
+        elif not fitting and categorical_columns(X):
+            _raise_categorical(categorical_columns(X))
         X_arr = np.asarray(X, dtype=np.float32)
         if X_arr.ndim != 2 or X_arr.shape[1] != self.n_features_in_:
             raise ValueError(f"X must have shape (n, {self.n_features_in_}), got {X_arr.shape}")
         return X_arr
+
+    def _fit_categories(self, X: ArrayLike, y: np.ndarray) -> ArrayLike:
+        """Handle pandas `category` columns in fit: order them by pooled mean y, or raise."""
+        self.category_encoder_: PooledMeanEncoder | None = None
+        columns = categorical_columns(X)
+        if not columns:
+            return X
+        if not self.order_categories:
+            _raise_categorical(columns)
+        assert isinstance(X, pd.DataFrame)
+        self.category_encoder_ = PooledMeanEncoder(columns).fit(X, y)
+        return self.category_encoder_.transform(X)
 
     def _model_X(self, X_arr: np.ndarray) -> np.ndarray:
         """The columns bartz sees: X with NaN imputed and missing indicators appended."""
@@ -235,8 +298,10 @@ class _BartBase(KwargsEstimator):
         JAX runs asynchronously, so fit can return before the MCMC has finished; the first
         prediction then waits for it.
         """
-        X_arr = self._check_X(X, fitting=True)
         y_arr = self._prepare_y(y)
+        X_given = X  # kept for the probe rows below, which must stay "as given"
+        X = self._fit_categories(X, y_arr)
+        X_arr = self._check_X(X, fitting=True)
         # Arguments of bartz.Bart this class sets that are not named arguments above.
         extra = dict(self._extra_kwargs())
         reserved = {"outcome_type", "seed", "printevery", "pbar"} & extra.keys()
@@ -280,9 +345,14 @@ class _BartBase(KwargsEstimator):
         )
         # Keep a copy of n_probe random training rows (as given) for diagnostics(). They are
         # not held out: bartz above was fit on all rows; these only say where to check f(x).
+        # They go through the same steps as any rows passed to predict (category encoding,
+        # imputation), so they are stored before those steps.
         rng = np.random.default_rng(self.random_state)
-        rows = rng.choice(len(X_arr), size=min(n_probe, len(X_arr)), replace=False)
-        self.X_probe_ = X_arr[np.sort(rows)]
+        rows = np.sort(rng.choice(len(X_arr), size=min(n_probe, len(X_arr)), replace=False))
+        if isinstance(X_given, pd.DataFrame):
+            self.X_probe_: ArrayLike = X_given.iloc[rows].copy()
+        else:
+            self.X_probe_ = np.asarray(X_given, dtype=np.float32)[rows]
         return self
 
     # --- posterior draws -----------------------------------------------------
@@ -477,12 +547,17 @@ class _BartBase(KwargsEstimator):
         prob: float = 0.95,
         rhat_max: float = 1.01,
         ess_min: float = 400,
+        per_point: bool = False,
+        leaf_fill_max: float = 0.25,
     ) -> pd.DataFrame:
         """MCMC convergence checks.
 
-        Covers the parameters (as in posterior_summary), the share of trees with an accepted
-        grow/prune move per iteration, and f(x) at the rows of `X_probe`. Checking f(x)
-        tells whether the predictions themselves have converged, not only global numbers.
+        Checks the parameters (as in posterior_summary) and f(x) at the rows of `X_probe`:
+        checking f(x) tells whether the predictions themselves have converged, not only
+        global numbers. Also reports the average acceptance rate (share of trees with an
+        accepted grow/prune move per iteration, after burn-in) and how full the trees are
+        (mean leaves per tree out of the most that maxdepth allows), which describe the
+        sampler and the model and are not checked for convergence.
 
         Parameters
         ----------
@@ -494,29 +569,86 @@ class _BartBase(KwargsEstimator):
             Probability inside the HPDI columns.
         rhat_max, ess_min : float, default 1.01 and 400
             A row is flagged when R-hat >= rhat_max or bulk/tail ESS <= ess_min.
+        per_point : bool, default False
+            Show one row per probe row instead of the two summary rows (see Returns).
+        leaf_fill_max : float, default 0.25
+            Warn when leaf_fill is above this (0.25 = 8 of 32 leaves with maxdepth=6).
 
         Returns
         -------
-        DataFrame in the same format as posterior_summary, with extra rows accept_rate and
-        f(x_probe[i]).
+        DataFrame in the same format as posterior_summary, with two rows that only have the
+        mean (their other columns are empty and their `ok` is <NA>):
+            accept_rate          average acceptance rate after burn-in
+            leaf_fill            mean leaves per tree / most leaves per tree, the
+                                 "leaves 2.6/32" of bartz's progress output (as a share,
+                                 0.081); the most is 2 ** (maxdepth - 1), in
+                                 `table.attrs["max_leaves"]`
+        and for f(x) at the probe rows either two summary rows (default) or one row per probe
+        row:
+            f(x_probe): median   median R-hat and ESS over the probe rows; ok if the median
+                                 point passes
+            f(x_probe): worst    largest R-hat and smallest ESS; ok if every point passes
+        The share of probe rows that pass is in `table.attrs["f_ok_share"]`.
+
+        Notes
+        -----
+        f(x) at single rows mixes much more slowly than sigma in BART: each prediction is a
+        sum of many trees that change little per iteration, so failing points are common on
+        large data. Chains that disagree make single-chain intervals too narrow; pooling
+        chains helps, and held-out coverage of predict_interval is a practical check.
+
+        BART works best with many small trees. A high leaf_fill means each tree does a lot
+        of the fitting, and the maxdepth limit may start to bind: use more trees (num_trees)
+        so that each stays small. The default prior (base=0.95, power=2) gives about 2.5
+        leaves per tree before seeing data. mean_tree_leaves (in the table, with R-hat) is
+        the same number per draw; plot it with plots.plot_trace to see if it is still rising.
 
         Warns
         -----
         UserWarning
             Listing the rows that fail R-hat < rhat_max or ESS > ess_min (Vehtari et al.
             2021). If so, run longer (n_burn / n_save, n_skip) or more chains.
+            Separately, when leaf_fill > leaf_fill_max.
         """
-        n_save = self.bart_.n_save
-        accept = np.asarray(self.bart_.accept).reshape(self.num_chains, -1)[:, -n_save:]
-        draws = {**self.parameter_draws(), "accept_rate": accept}
         X_check = self.X_probe_ if X_probe is None else X_probe
         mean_draws = self._draws(X_check, "mean_samples")
-        for i in range(mean_draws.shape[-1]):
-            draws[f"f(x_probe[{i}])"] = mean_draws[..., i]
-        table = summarize_draws(draws, prob, rhat_max=rhat_max, ess_min=ess_min)
-        failed = table.index[~table["ok"]].tolist()
+        f_draws = {f"f(x_probe[{i}])": mean_draws[..., i] for i in range(mean_draws.shape[-1])}
+        thresholds = {"prob": prob, "rhat_max": rhat_max, "ess_min": ess_min}
+        parameters = summarize_draws(self.parameter_draws(), **thresholds)
+        predictions = summarize_draws(f_draws, **thresholds)
+
+        # the sampler's average acceptance rate after burn-in: reported, not checked
+        n_save = self.bart_.n_save
+        accept = np.asarray(self.bart_.accept).reshape(self.num_chains, -1)[:, -n_save:]
+        # mean leaves per tree out of the most maxdepth allows: reported, not checked
+        max_leaves = 2 ** (self.maxdepth - 1)
+        mean_leaves = float(parameters["mean"].to_dict()["mean_tree_leaves"])
+        reported = pd.DataFrame(
+            {"mean": [float(accept.mean()), mean_leaves / max_leaves]},
+            index=["accept_rate", "leaf_fill"],
+        )
+
+        f_ok = predictions["ok"].to_numpy(dtype=bool)
+        if not per_point:
+            predictions = _summarize_points(predictions, rhat_max, ess_min)
+
+        table = pd.concat([parameters, reported, predictions])
+        table["ok"] = table["ok"].astype("boolean")  # <NA> for the reported rows
+        table.index.name = "name"
+        table.attrs["f_ok_share"] = float(f_ok.mean())
+        table.attrs["max_leaves"] = max_leaves
+
+        failed = parameters.index[~parameters["ok"]].tolist()
+        if not f_ok.all():
+            failed.append(f"f(x) at {int((~f_ok).sum())} of {len(f_ok)} probe rows")
         if failed:
             warnings.warn(f"Possible lack of convergence for: {failed}", stacklevel=2)
+        if mean_leaves / max_leaves > leaf_fill_max:
+            warnings.warn(
+                f"Large trees: {mean_leaves:.1f} of {max_leaves} leaves per tree on average "
+                f"(leaf_fill > {leaf_fill_max}); consider more trees (num_trees)",
+                stacklevel=2,
+            )
         return table
 
     def forest_summary(self) -> trees.ForestSummary:
@@ -586,6 +718,45 @@ class _BartBase(KwargsEstimator):
         if self.imputer_ is not None:  # NaN were imputed: no missing direction to report
             table["missing"] = None
         return table
+
+    def variable_importance(
+        self, X: ArrayLike | None = None, prob: float = 0.95, max_draws: int = 200
+    ) -> pd.DataFrame:
+        """Variable importances per feature, each with a posterior mean and HPDI.
+
+        Parameters
+        ----------
+        X : DataFrame or array of shape (n, p), optional
+            Same columns as in fit (e.g. training or test rows). Adds the row-weighted split
+            share and the fit-variance gain share, which need rows to route down the trees.
+        prob : float, default 0.95
+            Probability inside the HPDI columns.
+        max_draws : int, default 200
+            The X-based measures use at most this many draws, evenly spaced.
+
+        Returns
+        -------
+        DataFrame indexed by feature (the columns bartz sees, including `_missing`
+        indicators) with split_share, inclusion_prob and, with X, row_share and gain_share
+        (and split_prob with the sparse prior), each with `_low` / `_high` HPDI columns.
+        See importance.variable_importance for the definitions.
+        """
+        check_is_fitted(self, "bart_")
+        X_model = None if X is None else self._model_X(self._check_X(X))
+        return importance.variable_importance(
+            self.bart_, self.model_feature_names_, X_model, prob, max_draws
+        )
+
+    def interactions(self) -> pd.DataFrame:
+        """How often two features split as parent and child, most frequent first.
+
+        Returns
+        -------
+        DataFrame with columns feature_a, feature_b, mean_per_draw and share. See
+        importance.interactions.
+        """
+        check_is_fitted(self, "bart_")
+        return importance.interactions(self.bart_, self.model_feature_names_)
 
     def format_tree(self, chain: int = 0, draw: int = 0, tree: int = 0) -> str:
         """One sampled tree as readable text, with feature names, cut values and leaves.

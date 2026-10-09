@@ -22,12 +22,25 @@ All notable changes to this project. Format based on
 - `trees_to_dataframe` for BART (`BartRegressor` / `BartClassifier`) and XGBoost
   (`XGBDefault*`): every node of the selected trees as a table, like XGBoost's own, with the
   same columns for both (BART: optional `num_rows` from any `X`; XGBoost keeps its `cover`).
+- BART `variable_importance(X)`: split share, inclusion probability, row-weighted split share,
+  fit-variance gain share and (with the sparse prior) splitting probability, each with a
+  posterior mean and HPDI; `interactions()`: feature pairs splitting as parent and child.
+- BART: pandas `category` columns are ordered by default (`order_categories=True`): each level
+  is replaced by its partially pooled (empirical Bayes) mean of y (`PooledMeanEncoder`), since
+  BART has no categorical features; `order_categories=False` makes them raise a `TypeError`. The demo notebook no longer uses the categorical `x_cat`.
 - `tree_ensembles.tree_plot`: `plot_tree` and `plot_trees` draw BART or XGBoost trees from
   that table (splits, leaf values, node sizes; `max_depth` to cut deep trees).
 - `CLAUDE.md` with project conventions.
 
 ### Changed
 
+- BART `diagnostics()` reports the average acceptance rate as a single row (mean only) and no
+  longer checks it for convergence, so it no longer adds to the convergence warning.
+- BART `diagnostics()` summarizes f(x) at the probe rows in two rows (median and worst R-hat /
+  ESS) and reports the share of passing points; `per_point=True` shows every point.
+- BART `diagnostics()` reports `leaf_fill`, the mean leaves per tree out of the most that
+  `maxdepth` allows (bartz's "leaves 2.6/32" progress number, as a share), and warns when it is
+  above `leaf_fill_max=0.25`: large trees are a sign that more trees (`num_trees`) are needed.
 - Extra XGBoost / bartz parameters are plain keyword arguments (`**xgb_params`,
   `**bartz_params`) instead of a dict, e.g. `XGBDefaultRegressor(subsample=0.8)` or
   `BartRegressor(k=3.0)`; they work with `get_params`, `set_params`, `clone` and
