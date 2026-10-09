@@ -109,6 +109,17 @@ print(reg.optuna_best_params_)
 Only the best values are kept (`optuna_best_params_`, also merged into `params_`), not the
 Optuna study, so a saved model does not depend on the installed Optuna version.
 
+### Saving
+
+```python
+clf.dump("models/clf")  # model.ubj + estimator.pkl
+clf = XGBDefaultClassifier().load("models/clf")  # like XGBoost's load_model
+```
+
+The trees are saved in XGBoost's own format (`save_model`), which later XGBoost versions can
+read and which keeps the levels of `category` columns; the rest (settings, `params_`,
+`classes_`, ...) is a small pickle.
+
 ### Sample weights and offsets
 
 ```python

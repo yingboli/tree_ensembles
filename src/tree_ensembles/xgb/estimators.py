@@ -14,9 +14,11 @@ Any other XGBoost parameter can be passed as a keyword argument, e.g. subsample=
 
 fit() also takes sample_weight (frequency weights: n = sum of weights) and
 base_margin (an offset on the margin scale, passed to XGBoost as given).
+dump(folder) / load(folder) save and restore a fitted model (XGBoost's own format).
 """
 
 import warnings
+from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
 import numpy as np
@@ -26,8 +28,9 @@ import xgboost as xgb
 from sklearn.base import ClassifierMixin, RegressorMixin
 from sklearn.metrics import log_loss, root_mean_squared_error
 from sklearn.model_selection import train_test_split
+from sklearn.utils.validation import check_is_fitted
 
-from tree_ensembles._base import KwargsEstimator
+from tree_ensembles._base import KwargsEstimator, dump_state, load_state
 from tree_ensembles.xgb.callbacks import StopOnEmptyTree
 from tree_ensembles.xgb.defaults import default_max_bin, estimate_phi, ic_gamma
 from tree_ensembles.xgb.trees import trees_to_dataframe as _trees_table
@@ -377,6 +380,64 @@ class _XGBDefaultBase(KwargsEstimator):
         tree_ensembles.tree_plot.plot_tree / plot_trees.
         """
         return _trees_table(self.model_, trees)
+
+    # --- dump / load ---------------------------------------------------------
+
+    _MODEL_FILE = "model.ubj"  # XGBoost's own binary format (UBJSON)
+
+    def dump(self, path: str | Path) -> None:
+        """Write the fitted model to a folder.
+
+        The folder gets model.ubj (XGBoost's own format, via save_model) and estimator.pkl
+        (everything else: settings, params_, phi_, gamma_, classes_, ...). Reload with
+        `XGBDefaultClassifier().load(path)` (or XGBDefaultRegressor).
+
+        Parameters
+        ----------
+        path : str or Path
+            Folder to write; created if needed.
+
+        Notes
+        -----
+        XGBoost's format can be read by later XGBoost versions, and it keeps the category
+        levels of pandas `category` columns. estimator.pkl is a pickle of plain values
+        (numbers, arrays, dicts, the StopOnEmptyTree callback), so it needs this package but
+        not a particular XGBoost or Optuna version.
+        """
+        check_is_fitted(self, "model_")
+        folder = Path(path)
+        dump_state(self, folder, model_attr="model_")
+        self.model_.save_model(folder / self._MODEL_FILE)
+
+    def load(self, path: str | Path) -> "_XGBDefaultBase":
+        """Load a model written with `dump` into this estimator, like XGBoost's load_model.
+
+        Everything is restored: the fitted model and all settings (they replace this
+        estimator's own).
+
+        Parameters
+        ----------
+        path : str or Path
+            Folder written by dump.
+
+        Returns
+        -------
+        self, now fitted; so both `clf.load(path)` and
+        `clf = XGBDefaultClassifier().load(path)` work.
+
+        Raises
+        ------
+        FileNotFoundError
+            If the folder has no dump in it.
+        TypeError
+            If the folder holds the other class (e.g. an XGBDefaultClassifier loaded into an
+            XGBDefaultRegressor).
+        """
+        folder = Path(path)
+        load_state(self, folder, model_file=self._MODEL_FILE)
+        self.model_ = self._new_model({})
+        self.model_.load_model(folder / self._MODEL_FILE)
+        return self
 
 
 def _shared_doc(cls: type) -> str:

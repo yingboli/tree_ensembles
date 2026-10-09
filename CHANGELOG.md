@@ -34,6 +34,9 @@ All notable changes to this project. Format based on
 - `tree_ensembles.tree_plot`: `plot_tree` and `plot_trees` draw BART or XGBoost trees from
   that table (splits, leaf values, node sizes; `max_depth` to cut deep trees).
 - `CLAUDE.md` with project conventions.
+- XGBoost `dump(folder)` / `load(folder)` for `XGBDefaultClassifier` / `XGBDefaultRegressor`,
+  like BART's: the trees in XGBoost's own format (`model.ubj`, readable by later XGBoost
+  versions, keeps `category` levels) and the rest of the estimator in `estimator.pkl`.
 
 ### Changed
 

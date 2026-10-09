@@ -1,4 +1,5 @@
 import math
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -6,6 +7,7 @@ import pandas as pd
 import pytest
 from sklearn.base import clone
 from sklearn.datasets import load_breast_cancer
+from sklearn.exceptions import NotFittedError
 from sklearn.metrics import r2_score, roc_auc_score
 from sklearn.model_selection import GridSearchCV, cross_val_score, train_test_split
 
@@ -318,3 +320,45 @@ def test_estimator_pickled_by_version_0_3_still_works(regression_data: tuple) ->
     reg.xgb_params = None  # type: ignore[assignment]  # what a 0.3.0 pickle holds
     assert "n_estimators=5" in repr(reg)
     assert clone(reg).fit(X, y).n_trees_ <= 5
+
+
+def test_dump_and_load_classifier(tmp_path: Path) -> None:
+    rng = np.random.default_rng(1)
+    n = 600
+    X = pd.DataFrame(
+        {"a": rng.normal(size=n), "c": pd.Categorical(rng.choice(["u", "v", "w"], size=n))}
+    )
+    y = np.where(X["a"] + (X["c"] == "v") + 0.5 * rng.normal(size=n) > 0.3, "yes", "no")
+    clf = XGBDefaultClassifier(learning_rate="optuna", n_optuna_trials=3, subsample=0.9)
+    clf.fit(X, y)
+    clf.dump(tmp_path / "clf")
+    assert {p.name for p in (tmp_path / "clf").iterdir()} == {"model.ubj", "estimator.pkl"}
+
+    loaded = XGBDefaultClassifier(max_depth=2).load(tmp_path / "clf")  # settings replaced
+    assert loaded.max_depth == 6 and loaded.xgb_params == {"subsample": 0.9}
+    assert list(loaded.classes_) == ["no", "yes"]
+    assert loaded.optuna_best_params_ == clf.optuna_best_params_
+    assert loaded.n_trees_ == clf.n_trees_ and loaded.gamma_ == clf.gamma_
+    np.testing.assert_allclose(loaded.predict_proba(X), clf.predict_proba(X))
+    np.testing.assert_array_equal(loaded.predict(X), clf.predict(X))
+    # category levels are kept by XGBoost's format: a different level order still works
+    reordered = X.assign(c=X["c"].cat.reorder_categories(["w", "v", "u"]))
+    np.testing.assert_allclose(loaded.predict_proba(reordered), clf.predict_proba(X))
+    pd.testing.assert_frame_equal(loaded.trees_to_dataframe(), clf.trees_to_dataframe())
+
+
+def test_load_fills_the_estimator_in_place(regression_data: tuple, tmp_path: Path) -> None:
+    X, y = regression_data
+    reg = XGBDefaultRegressor(n_estimators=20).fit(X, y)
+    reg.dump(tmp_path / "reg")
+    other = XGBDefaultRegressor()
+    assert other.load(tmp_path / "reg") is other and other.n_estimators == 20
+    np.testing.assert_allclose(other.predict(X[:10]), reg.predict(X[:10]))
+    assert clone(other).get_params() == reg.get_params()  # refitting works as usual
+
+    with pytest.raises(TypeError, match="XGBDefaultRegressor"):
+        XGBDefaultClassifier().load(tmp_path / "reg")
+    with pytest.raises(FileNotFoundError, match="No model dumped"):
+        XGBDefaultRegressor().load(tmp_path / "empty")
+    with pytest.raises(NotFittedError):
+        XGBDefaultRegressor().dump(tmp_path / "unfitted")

@@ -15,7 +15,6 @@ Notes:
       fine for caching, not for long-term archival.
 """
 
-import pickle
 import warnings
 from pathlib import Path
 from typing import Any, Literal
@@ -27,7 +26,7 @@ from bartz import Bart
 from sklearn.base import ClassifierMixin, RegressorMixin
 from sklearn.utils.validation import check_is_fitted
 
-from tree_ensembles._base import KwargsEstimator
+from tree_ensembles._base import KwargsEstimator, dump_state, load_state
 from tree_ensembles.bart import importance, trees
 from tree_ensembles.bart.categories import PooledMeanEncoder, categorical_columns, text_columns
 from tree_ensembles.bart.diagnostics import summarize_draws
@@ -810,11 +809,8 @@ class _BartBase(KwargsEstimator):
         """
         check_is_fitted(self, "bart_")
         folder = Path(path)
-        folder.mkdir(parents=True, exist_ok=True)
+        dump_state(self, folder, model_attr="bart_")
         self.bart_.dump(folder / "bart.pkl")
-        state = {k: v for k, v in self.__dict__.items() if k != "bart_"}
-        with (folder / "estimator.pkl").open("wb") as f:
-            pickle.dump((type(self), state), f)
 
     def load(self, path: str | Path) -> "_BartBase":
         """Load a model written with `dump` into this estimator, like XGBoost's load_model.
@@ -840,17 +836,7 @@ class _BartBase(KwargsEstimator):
             BartRegressor).
         """
         folder = Path(path)
-        missing = [name for name in ("estimator.pkl", "bart.pkl") if not (folder / name).exists()]
-        if missing:
-            raise FileNotFoundError(f"No model dumped in {folder}: {missing} not found")
-        with (folder / "estimator.pkl").open("rb") as f:
-            cls, state = pickle.load(f)
-        if cls is not type(self):
-            raise TypeError(
-                f"{folder} holds a {cls.__name__}; load it with {cls.__name__}().load(...)"
-            )
-        self.__dict__.clear()  # drop anything from an earlier fit
-        self.__dict__.update(state)
+        load_state(self, folder, model_file="bart.pkl")
         self.bart_ = Bart.load(folder / "bart.pkl")
         return self
 

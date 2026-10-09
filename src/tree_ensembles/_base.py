@@ -1,8 +1,62 @@
-"""Shared base for estimators that pass extra keyword arguments to an underlying library."""
+"""Shared base for the estimators: extra keyword arguments, and dumping to a folder."""
 
+import pickle
+from pathlib import Path
 from typing import Any
 
 from sklearn.base import BaseEstimator
+
+STATE_FILE = "estimator.pkl"  # the estimator's own state, next to the library's model file
+
+
+def dump_state(estimator: BaseEstimator, folder: Path, model_attr: str) -> None:
+    """Pickle the estimator's class and attributes, except the library model, to a folder.
+
+    The library model (`model_attr`) is written separately in the library's own format.
+
+    Parameters
+    ----------
+    estimator : BaseEstimator
+        A fitted estimator.
+    folder : Path
+        Folder to write; created if needed.
+    model_attr : str
+        Name of the attribute holding the library model, left out of the pickle.
+    """
+    folder.mkdir(parents=True, exist_ok=True)
+    state = {k: v for k, v in estimator.__dict__.items() if k != model_attr}
+    with (folder / STATE_FILE).open("wb") as f:
+        pickle.dump((type(estimator), state), f)
+
+
+def load_state(estimator: BaseEstimator, folder: Path, model_file: str) -> None:
+    """Replace the estimator's attributes by those written with dump_state.
+
+    Parameters
+    ----------
+    estimator : BaseEstimator
+        The estimator to fill; all its own attributes are dropped first.
+    folder : Path
+        Folder written by dump_state.
+    model_file : str
+        Name of the library's model file, which must be in the folder too.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the folder has no dump in it.
+    TypeError
+        If the folder holds another class (e.g. a classifier loaded into a regressor).
+    """
+    missing = [name for name in (STATE_FILE, model_file) if not (folder / name).exists()]
+    if missing:
+        raise FileNotFoundError(f"No model dumped in {folder}: {missing} not found")
+    with (folder / STATE_FILE).open("rb") as f:
+        cls, state = pickle.load(f)
+    if cls is not type(estimator):
+        raise TypeError(f"{folder} holds a {cls.__name__}; load it with {cls.__name__}().load(...)")
+    estimator.__dict__.clear()  # drop anything from an earlier fit
+    estimator.__dict__.update(state)
 
 
 class KwargsEstimator(BaseEstimator):
