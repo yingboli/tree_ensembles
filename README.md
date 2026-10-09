@@ -215,7 +215,9 @@ plot_variable_usage`.
   `category` column is replaced by its partially pooled mean of y (a normal
   hierarchical model with empirical Bayes variances, `PooledMeanEncoder`), which orders similar
   levels next to each other. With `order_categories=False` they raise an error; encode them
-  yourself instead (e.g. one-hot). XGBoost handles pandas
+  yourself instead (e.g. one-hot). Only `category` columns count as categorical: text
+  (`object` / `string`) columns raise an error asking for `.astype("category")` or
+  `pd.to_numeric`. XGBoost handles pandas
   `category` columns natively (`enable_categorical=True`). Ordering by
   residuals instead of y (once, or at every split, which needs bartz changes) is discussed in
   `bart/categories.py`.

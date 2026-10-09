@@ -125,12 +125,12 @@ def test_diagnostics_table(fitted_regressor: BartRegressor) -> None:
 
 
 def test_diagnostics_warns_for_large_trees(fitted_regressor: BartRegressor) -> None:
-    passing = {"rhat_max": np.inf, "ess_min": 0}  # no convergence warning
     with pytest.warns(UserWarning, match="Large trees"):
-        fitted_regressor.diagnostics(leaf_fill_max=0.0, **passing)
+        # thresholds anyone passes, so there is no convergence warning
+        fitted_regressor.diagnostics(rhat_max=np.inf, ess_min=0, leaf_fill_max=0.0)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        fitted_regressor.diagnostics(leaf_fill_max=1.0, **passing)
+        fitted_regressor.diagnostics(rhat_max=np.inf, ess_min=0, leaf_fill_max=1.0)
     assert not any("Large trees" in str(w.message) for w in caught)
 
 

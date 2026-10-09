@@ -98,6 +98,20 @@ def test_bart_rejects_categories_without_ordering(category_data: tuple) -> None:
         reg.predict(codes[:5])  # category columns at predict time as well
 
 
+@pytest.mark.parametrize("dtype", [object, "string"])
+def test_bart_rejects_text_columns(category_data: tuple, dtype: Any) -> None:
+    X, y = category_data
+    text = X.assign(color=X["color"].astype(dtype))
+    with pytest.raises(TypeError, match=r"astype\('category'\)"):
+        BartRegressor(**SMALL).fit(text, y)
+    numbers_as_text = X.assign(color=X["color"].cat.codes.astype(str).astype(dtype))
+    with pytest.raises(TypeError, match="pd.to_numeric"):
+        BartRegressor(**SMALL).fit(numbers_as_text, y)  # not silently read as numbers
+    reg = BartRegressor(**SMALL).fit(X, y)
+    with pytest.raises(TypeError, match="text"):
+        reg.predict(text[:5])  # at predict time as well
+
+
 def test_bart_orders_categories(category_data: tuple, tmp_path: Path) -> None:
     X, y = category_data
     with warnings.catch_warnings():

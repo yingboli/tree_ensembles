@@ -29,7 +29,7 @@ from sklearn.utils.validation import check_is_fitted
 
 from tree_ensembles._base import KwargsEstimator
 from tree_ensembles.bart import importance, trees
-from tree_ensembles.bart.categories import PooledMeanEncoder, categorical_columns
+from tree_ensembles.bart.categories import PooledMeanEncoder, categorical_columns, text_columns
 from tree_ensembles.bart.diagnostics import summarize_draws
 from tree_ensembles.bart.intervals import hpdi, quantile_interval
 from tree_ensembles.bart.missing import MissingValueImputer
@@ -44,6 +44,15 @@ def _raise_categorical(columns: list[str]) -> None:
         f"X has categorical columns {columns}, which BART does not support (bartz splits "
         "every column as numbers). Set order_categories=True to order the levels by a "
         "partially pooled mean of y, or encode them yourself (e.g. one-hot)."
+    )
+
+
+def _raise_text(columns: list[str]) -> None:
+    """Refuse `object` / `string` columns: categories or numbers, BART does not guess."""
+    raise TypeError(
+        f"X has text (object or string) columns {columns}. Convert categorical ones with "
+        ".astype('category') (ordered by pooled mean y with order_categories=True) and "
+        "numeric ones with pd.to_numeric."
     )
 
 
@@ -132,8 +141,10 @@ class _BartBase(KwargsEstimator):
         which orders similar levels next to each other (see categories.PooledMeanEncoder).
         It is one global order (no level-specific interactions) and uses y for the encoding
         as well as the fit. With False, `category` columns raise a TypeError (in fit and
-        predict); encode them yourself (e.g. one-hot) instead. Integer codes in numeric
-        columns are not detected and are split as numbers.
+        predict); encode them yourself (e.g. one-hot) instead. Only `category` columns are
+        categorical: `object` and `string` columns raise a TypeError (convert them with
+        .astype("category") or pd.to_numeric), and integer codes in numeric columns are
+        split as numbers.
     **bartz_params
         Any other argument of bartz.Bart, e.g. k=2.0, sigma_df=3.0 or
         sparse=SparseConfig(...). They work with get_params, set_params, clone and
@@ -245,6 +256,8 @@ class _BartBase(KwargsEstimator):
                     f"missing: {missing}, unexpected: {extra}"
                     + ("" if missing or extra else " (same names, different order)")
                 )
+        if text_columns(X):
+            _raise_text(text_columns(X))
         encoder = getattr(self, "category_encoder_", None)  # None for models from older versions
         if not fitting and encoder is not None:
             if not isinstance(X, pd.DataFrame):

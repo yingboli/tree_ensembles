@@ -27,7 +27,10 @@ All notable changes to this project. Format based on
   posterior mean and HPDI; `interactions()`: feature pairs splitting as parent and child.
 - BART: pandas `category` columns are ordered by default (`order_categories=True`): each level
   is replaced by its partially pooled (empirical Bayes) mean of y (`PooledMeanEncoder`), since
-  BART has no categorical features; `order_categories=False` makes them raise a `TypeError`. The demo notebook no longer uses the categorical `x_cat`.
+  BART has no categorical features; `order_categories=False` makes them raise a `TypeError`.
+  Text (`object` / `string`) columns raise a `TypeError` that says to convert them with
+  `.astype("category")` or `pd.to_numeric`, instead of a bare float-conversion error (or, for
+  numbers stored as text, being read silently as numbers). The demo notebook no longer uses the categorical `x_cat`.
 - `tree_ensembles.tree_plot`: `plot_tree` and `plot_trees` draw BART or XGBoost trees from
   that table (splits, leaf values, node sizes; `max_depth` to cut deep trees).
 - `CLAUDE.md` with project conventions.

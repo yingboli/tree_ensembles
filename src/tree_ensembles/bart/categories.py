@@ -58,6 +58,19 @@ def categorical_columns(X: Any) -> list[str]:
     return [str(c) for c in X.columns if isinstance(X[c].dtype, pd.CategoricalDtype)]
 
 
+def text_columns(X: Any) -> list[str]:
+    """Names of the `object` and `string` columns of X (none for an array).
+
+    BART does not guess whether such a column holds categories or numbers stored as text;
+    it asks for `category` (or numeric) columns instead.
+    """
+    if not isinstance(X, pd.DataFrame):
+        return []
+    return [
+        str(c) for c in X.columns if X[c].dtype == object or isinstance(X[c].dtype, pd.StringDtype)
+    ]
+
+
 def _levels(column: pd.Series) -> pd.Series:
     """The column's values as objects, with missing values replaced by the _MISSING level."""
     values = column.astype(object)
