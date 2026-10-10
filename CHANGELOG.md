@@ -6,6 +6,14 @@ All notable changes to this project. Format based on
 
 ## [Unreleased]
 
+- BART `predict_summary(X, prob=0.95, n_skip_pred=1)` replaces `predict_dist`: mean, sd,
+  predictive sd and the HPDI of f(x) (of p(x) for the classifier) from a single evaluation of
+  the trees, the slow part of BART. Breaking: `predict_dist` is removed; use `predict_summary`
+  (same first three columns, plus `hpdi_<prob>_low` / `hpdi_<prob>_high`).
+- BART `n_skip_pred` in `predict`, `predict_proba`, `predict_summary`, `predict_interval` and
+  `predict_samples`: use every k-th saved draw of each chain, about k times faster to score.
+  MCMC draws are autocorrelated, so a few hundred draws give nearly the same predictions. The
+  fitted model is not changed (unlike `n_skip`).
 - `load` fills the estimator it is called on, like XGBoost's `load_model`:
   `reg = BartRegressor(); reg.load(folder)` or `reg = BartRegressor().load(folder)`. Breaking:
   `BartRegressor.load(folder)` becomes `BartRegressor().load(folder)`. Loading the other class or
@@ -53,7 +61,7 @@ All notable changes to this project. Format based on
   `GridSearchCV`. Replace `xgb_params={"subsample": 0.8}` with `subsample=0.8`.
 - Optuna samples `learning_rate` on a log scale (`log=True`) within [0.05, 0.3].
 - Module-level settings became arguments: `fit(..., n_probe=20)` for the rows checked by
-  `diagnostics()`, `batch_size=2000` in `predict_dist` / `predict_interval`, and
+  `diagnostics()`, `batch_size=2000` in `predict_summary` / `predict_interval`, and
   `rhat_max=1.01`, `ess_min=400` in `summarize_draws`, `posterior_summary` and `diagnostics`.
 
 ## [0.3.0] - 2026-10-05

@@ -167,7 +167,8 @@ bart = BartRegressor(num_trees=200, n_save=1000, n_burn=1000, num_chains=4)
 bart.fit(X_train, y_train)
 
 bart.predict(X_test)  # posterior mean of f(x)
-bart.predict_dist(X_test)  # mean, sd of f(x), posterior predictive sd
+bart.predict_summary(X_test)  # mean, sd, predictive sd and 95% HPDI of f(x), in one pass
+bart.predict_summary(X_test, n_skip_pred=10)  # every 10th draw: about 10x faster
 bart.predict_interval(X_test, prob=0.95, kind="predictive")  # 95% HPDI for a new y
 bart.predict_samples(X_test)  # all posterior draws of f(x), shape (draws, rows)
 
@@ -244,6 +245,10 @@ plot_variable_usage`.
   `base / (1 + d) ** power`) and `n_skip` (keep every n-th draw) are named arguments.
 - **Other bartz options** (`sparse`, `k`, `sigma_df`, ...) are keyword arguments, e.g.
   `BartRegressor(k=3.0)`. Sample weights and offsets are not supported yet.
+- **Prediction speed:** every prediction evaluates all trees of all saved draws (chains x
+  `n_save` x `num_trees` trees per row), so scoring is far slower than for XGBoost. Use
+  `predict_summary` to get the mean, sd and HPDI from one evaluation, and `n_skip_pred=k` to use
+  every k-th draw (about k times faster; the draws are autocorrelated, so little is lost).
 - **Saving:** `bart.dump("folder")` / `BartRegressor().load("folder")` (like XGBoost's `load_model`) use bartz's own format,
   which depends on the bartz/JAX versions: good for caching, not for archiving. With many trees
   the file is large (about 4 GB for 10,000 trees x 1,000 draws).

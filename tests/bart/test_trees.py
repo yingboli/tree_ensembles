@@ -19,7 +19,7 @@ def test_node_depths() -> None:
 def test_tree_walk_matches_bartz(fitted_regressor: BartRegressor, regression_data: tuple) -> None:
     X, _ = regression_data
     X_test = X[:40].to_numpy(dtype=np.float32)
-    latent = fitted_regressor._draws(X[:40], "latent_samples")
+    latent = fitted_regressor._bartz_predict(X[:40], "latent_samples")
     for chain, draw in [(0, 0), (1, 123), (1, 299)]:
         ours = predict_one_draw(fitted_regressor.bart_, X_test, chain, draw)
         np.testing.assert_allclose(ours, latent[chain, draw], atol=1e-5)
@@ -40,7 +40,7 @@ def test_tree_walk_with_nan_matches_bartz() -> None:
     )
     with pytest.warns(UserWarning, match="NaN"):
         reg.fit(X, y)
-    latent = reg._draws(X[:50], "latent_samples")
+    latent = reg._bartz_predict(X[:50], "latent_samples")
     for draw in range(20):
         np.testing.assert_allclose(
             predict_one_draw(reg.bart_, X[:50], 0, draw), latent[0, draw], atol=1e-5
@@ -107,7 +107,7 @@ def test_tree_walk_matches_bartz_for_both_kinds_of_nan_features() -> None:
     assert trees.nan_bin[1] > real_cuts[1] + 1  # few NaN: binned above the NaN cutpoints
     assert trees.nan_bin[2] == real_cuts[2]  # many NaN: right above the real cutpoints
 
-    latent = reg._draws(X, "latent_samples")
+    latent = reg._bartz_predict(X, "latent_samples")
     for draw in range(30):
         np.testing.assert_allclose(
             predict_one_draw(reg.bart_, X, 0, draw), latent[0, draw], atol=1e-5
@@ -135,7 +135,7 @@ def test_trees_to_dataframe_reproduces_predictions(
     table = fitted_regressor.trees_to_dataframe(chains=1, draws=-1)  # all trees of one draw
     assert set(table["chain"]) == {1} and set(table["draw"]) == {299}
     assert table.groupby("tree").size().size == 50
-    latent = fitted_regressor._draws(X[:5], "latent_samples")[1, 299]
+    latent = fitted_regressor._bartz_predict(X[:5], "latent_samples")[1, 299]
     offset = float(fitted_regressor.bart_._main_trace.offset)
     index = {name: j for j, name in enumerate(fitted_regressor.model_feature_names_)}
     for i in range(5):

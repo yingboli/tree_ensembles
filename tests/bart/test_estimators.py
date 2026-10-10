@@ -39,15 +39,15 @@ def test_predictions_in_row_batches(
     fitted_regressor: BartRegressor, regression_data: tuple
 ) -> None:
     X, _ = regression_data
-    whole = fitted_regressor.predict_dist(X[:50])
-    pd.testing.assert_frame_equal(fitted_regressor.predict_dist(X[:50], batch_size=7), whole)
+    whole = fitted_regressor.predict_summary(X[:50])
+    pd.testing.assert_frame_equal(fitted_regressor.predict_summary(X[:50], batch_size=7), whole)
     np.testing.assert_allclose(fitted_regressor.predict(X[:50]), whole["mean"], rtol=1e-5)
     pd.testing.assert_frame_equal(
         fitted_regressor.predict_interval(X[:50], batch_size=7),
         fitted_regressor.predict_interval(X[:50]),
     )
     with pytest.raises(ValueError, match="batch_size"):
-        fitted_regressor.predict_dist(X[:5], batch_size=0)
+        fitted_regressor.predict_summary(X[:5], batch_size=0)
 
 
 def test_n_probe_and_thresholds(regression_data: tuple) -> None:
@@ -70,14 +70,26 @@ def test_n_probe_and_thresholds(regression_data: tuple) -> None:
     assert not reg.posterior_summary(ess_min=1e9)["ok"].any()
 
 
-def test_predict_dist_and_intervals(
+def test_predict_summary_and_intervals(
     fitted_regressor: BartRegressor, regression_data: tuple
 ) -> None:
     X, y = regression_data
     X_test, y_test = X[800:], y[800:]
-    dist = fitted_regressor.predict_dist(X_test)
-    assert list(dist.index) == list(X_test.index)
-    assert (dist["predictive_sd"] > dist["sd"]).all()  # adds the noise variance
+    summary = fitted_regressor.predict_summary(X_test)
+    assert list(summary.index) == list(X_test.index)
+    assert list(summary.columns) == [
+        "mean",
+        "sd",
+        "predictive_sd",
+        "hpdi_0.95_low",
+        "hpdi_0.95_high",
+    ]
+    assert (summary["predictive_sd"] > summary["sd"]).all()  # adds the noise variance
+    # the HPDI columns are predict_interval's (kind="mean"), from the same evaluation
+    interval = fitted_regressor.predict_interval(X_test)
+    np.testing.assert_allclose(summary["hpdi_0.95_low"], interval["lower"])
+    np.testing.assert_allclose(summary["hpdi_0.95_high"], interval["upper"])
+    assert "hpdi_0.8_low" in fitted_regressor.predict_summary(X_test[:5], prob=0.8)
 
     pred = fitted_regressor.predict_interval(X_test, kind="predictive")  # default 95%
     coverage = np.mean((y_test >= pred["lower"]) & (y_test <= pred["upper"]))
@@ -89,13 +101,49 @@ def test_predict_dist_and_intervals(
     assert np.median((mean["upper"] - mean["lower"]) / (quant["upper"] - quant["lower"])) <= 1
 
 
+def test_n_skip_pred_uses_every_kth_draw(
+    fitted_regressor: BartRegressor, fitted_classifier: BartClassifier, regression_data: tuple
+) -> None:
+    X, _ = regression_data
+    rows = X[:20]
+    draws = fitted_regressor._bartz_predict(rows, "mean_samples")  # (chain, draw, row): 2 x 300
+    kept = draws[:, ::4].reshape(-1, len(rows))  # 2 x 75 draws
+    np.testing.assert_allclose(
+        fitted_regressor.predict_samples(rows, n_skip_pred=4), kept, rtol=1e-6
+    )
+    np.testing.assert_allclose(
+        fitted_regressor.predict(rows, n_skip_pred=4), kept.mean(axis=0), rtol=1e-5, atol=1e-6
+    )
+    summary = fitted_regressor.predict_summary(rows, n_skip_pred=4)
+    np.testing.assert_allclose(summary["sd"], kept.std(axis=0, ddof=1), rtol=1e-5)
+    sigma2 = np.mean(fitted_regressor.parameter_draws()["sigma"][:, ::4] ** 2)
+    np.testing.assert_allclose(
+        summary["predictive_sd"] ** 2, kept.var(axis=0, ddof=1) + sigma2, rtol=1e-5
+    )
+    assert fitted_regressor.bart_.n_save == 300  # the fitted model is not thinned
+
+    p_draws = fitted_classifier._bartz_predict(rows, "mean_samples")[:, ::4]
+    np.testing.assert_allclose(
+        fitted_classifier.predict_proba(rows, n_skip_pred=4)[:, 1],
+        p_draws.reshape(-1, len(rows)).mean(axis=0),
+        rtol=1e-5,
+        atol=1e-6,
+    )
+    interval = fitted_regressor.predict_interval(rows, n_skip_pred=4, method="quantile")
+    np.testing.assert_allclose(interval["lower"], np.quantile(kept, 0.025, axis=0), rtol=1e-5)
+    np.testing.assert_allclose(interval["upper"], np.quantile(kept, 0.975, axis=0), rtol=1e-5)
+    for bad in (0, 301, 2.0):
+        with pytest.raises(ValueError, match="n_skip_pred"):
+            fitted_regressor.predict(rows, n_skip_pred=bad)  # type: ignore[arg-type]
+
+
 def test_draw_shapes_follow_chain_order(
     fitted_regressor: BartRegressor, regression_data: tuple
 ) -> None:
     X, _ = regression_data
     draws = fitted_regressor.predict_samples(X[:5])
     assert draws.shape == (2 * 300, 5)
-    by_chain = fitted_regressor._draws(X[:5], "mean_samples")
+    by_chain = fitted_regressor._bartz_predict(X[:5], "mean_samples")
     np.testing.assert_array_equal(by_chain[1, 0], draws[300])  # chain 1 starts at row 300
 
 
@@ -148,6 +196,11 @@ def test_classifier(fitted_classifier: BartClassifier, regression_data: tuple) -
     assert roc_auc_score(truth, proba[:, 1]) > 0.85
     assert abs(proba[:, 1].mean() - truth.mean()) < 0.1
     assert set(fitted_classifier.predict(X[800:])) <= {"yes", "no"}
+    summary = fitted_classifier.predict_summary(X[800:])
+    np.testing.assert_allclose(summary["mean"], proba[:, 1], rtol=1e-5, atol=1e-6)
+    p = summary["mean"]
+    np.testing.assert_allclose(summary["predictive_sd"], np.sqrt(p * (1 - p)), rtol=1e-6)
+    assert ((summary["hpdi_0.95_low"] >= 0) & (summary["hpdi_0.95_high"] <= 1)).all()
 
     interval = fitted_classifier.predict_interval(X[800:])
     assert ((interval["lower"] >= 0) & (interval["upper"] <= 1)).all()

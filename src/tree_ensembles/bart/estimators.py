@@ -2,7 +2,7 @@
 
 Beyond fit / predict / predict_proba, each fitted model gives:
     predict_samples    posterior draws of f(x) (or p(x)), or of new outcomes
-    predict_dist       posterior mean, sd of f(x), and posterior predictive sd
+    predict_summary    posterior mean, sd, predictive sd and HPDI of f(x), in one pass
     predict_interval   HPDI (or equal-tailed) credible / predictive intervals
     posterior_summary  mean, sd, HPDI, R-hat and ESS of the model's parameters
     diagnostics        MCMC convergence checks, including f(x) at probe points
@@ -19,6 +19,7 @@ import warnings
 from pathlib import Path
 from typing import Any, Literal
 
+import equinox as eqx
 import jax
 import numpy as np
 import pandas as pd
@@ -87,6 +88,31 @@ def _row_chunks(X: ArrayLike, batch_size: int) -> list[ArrayLike]:
     if isinstance(X, pd.DataFrame):
         return [X.iloc[i : i + batch_size] for i in starts]
     return [X[i : i + batch_size] for i in starts]
+
+
+def _thin_draws(bart: Bart, n_skip_pred: int) -> Bart:
+    """The model keeping only every n_skip_pred-th saved draw of each chain.
+
+    Predicting evaluates every tree of every kept draw, so the time is proportional to the
+    number of draws: n_skip_pred=4 is about 4 times faster. The model passed in is not
+    changed (this is a thinned copy of its trace).
+    """
+    n_save = bart.n_save
+    if not isinstance(n_skip_pred, int | np.integer) or not 1 <= n_skip_pred <= n_save:
+        raise ValueError(f"n_skip_pred must be an int in [1, {n_save}], got {n_skip_pred!r}")
+    if n_skip_pred == 1:
+        return bart
+    trace = bart._main_trace
+    # per-draw arrays start with (chain, draw), or (draw,) without a chain axis; the per-draw
+    # acceptance counts always have exactly that shape
+    prefix = trace.grow_prop_count.shape
+
+    def thin(leaf: Any) -> Any:
+        if getattr(leaf, "shape", ())[: len(prefix)] != prefix:
+            return leaf  # not per draw, e.g. the offset
+        return jax.lax.slice_in_dim(leaf, 0, None, stride=n_skip_pred, axis=len(prefix) - 1)
+
+    return eqx.tree_at(lambda b: b._main_trace, bart, jax.tree.map(thin, trace))
 
 
 class _BartBase(KwargsEstimator):
@@ -223,8 +249,12 @@ class _BartBase(KwargsEstimator):
         """Check and encode the training target as float32 (0/1 for the classifier)."""
         raise NotImplementedError
 
-    def _predictive_var(self, mean_draws: np.ndarray) -> np.ndarray:
-        """Posterior predictive variance of a new outcome, from draws of its mean."""
+    def _predictive_var(self, mean_draws: np.ndarray, n_skip_pred: int = 1) -> np.ndarray:
+        """Posterior predictive variance of a new outcome, from draws of its mean.
+
+        `n_skip_pred` says which draws `mean_draws` holds (every n_skip_pred-th), so that
+        any other per-draw parameter (sigma) uses the same draws.
+        """
         raise NotImplementedError
 
     def _parameter_draws(self) -> dict[str, np.ndarray]:
@@ -281,8 +311,10 @@ class _BartBase(KwargsEstimator):
         self.category_encoder_ = PooledMeanEncoder(columns).fit(X, y)
         return self.category_encoder_.transform(X)
 
-    def _model_X(self, X_arr: np.ndarray) -> np.ndarray:
-        """The columns bartz sees: X with NaN imputed and missing indicators appended."""
+    def _model_X(self, X: ArrayLike) -> np.ndarray:
+        """The columns bartz sees for new rows: X checked and encoded (_check_X), then NaN
+        imputed and missing indicators appended."""
+        X_arr = self._check_X(X)  # checks it is fitted first
         return X_arr if self.imputer_ is None else self.imputer_.transform(X_arr)
 
     # --- fitting -------------------------------------------------------------
@@ -340,7 +372,7 @@ class _BartBase(KwargsEstimator):
                 )
 
         self.bart_ = Bart(
-            self._model_X(X_arr).T,  # bartz wants (p, n)
+            (X_arr if self.imputer_ is None else self.imputer_.transform(X_arr)).T,  # (p, n)
             y_arr,
             outcome_type=self._outcome_type,
             num_trees=self.num_trees,
@@ -369,23 +401,34 @@ class _BartBase(KwargsEstimator):
 
     # --- posterior draws -----------------------------------------------------
 
-    def _draws(self, X: ArrayLike, kind: str, seed: int | None = None) -> np.ndarray:
-        """bartz predictions for X, reshaped to (chain, draw, n).
+    def _bartz_predict(
+        self, X: ArrayLike, kind: str, n_skip_pred: int = 1, seed: int | None = None
+    ) -> np.ndarray:
+        """The one place that asks bartz for predictions.
 
-        bartz returns all chains concatenated along the draw axis, chain 0 first, so a plain
-        reshape restores the chain axis. `kind` is a bartz PredictKind ("mean_samples",
-        "outcome_samples" or "latent_samples"); `seed` is only used for "outcome_samples".
+        X goes through _model_X; with n_skip_pred > 1 only every n_skip_pred-th draw of each
+        chain is used (_thin_draws). `kind` is a bartz PredictKind: "mean" gives the
+        posterior mean, shape (m,), averaged inside bartz without storing the draws;
+        "mean_samples", "latent_samples" and "outcome_samples" give draws shaped
+        (chain, draw, m). `seed` is only used for "outcome_samples".
         """
-        X_arr = self._model_X(self._check_X(X))
+        X_model = self._model_X(X)
+        bart = _thin_draws(self.bart_, n_skip_pred)
         key = jax.random.key(self.random_state + 1 if seed is None else seed)
-        out = self.bart_.predict(X_arr.T, kind=kind, key=key if kind == "outcome_samples" else None)
-        return np.asarray(out).reshape(self.num_chains, self.bart_.n_save, len(X_arr))
+        out = np.asarray(
+            bart.predict(X_model.T, kind=kind, key=key if kind == "outcome_samples" else None)
+        )
+        if kind == "mean":
+            return out
+        # bartz concatenates the chains along the draw axis, chain 0 first
+        return out.reshape(self.num_chains, bart.n_save, len(X_model))
 
     def predict_samples(
         self,
         X: ArrayLike,
         kind: Literal["mean", "predictive"] = "mean",
         seed: int | None = None,
+        n_skip_pred: int = 1,
     ) -> np.ndarray:
         """Posterior draws for every row of X, chains pooled.
 
@@ -399,24 +442,42 @@ class _BartBase(KwargsEstimator):
             noise (0/1 draws for the classifier).
         seed : int, optional
             Seed for the noise in kind="predictive"; default random_state + 1.
+        n_skip_pred : int, default 1
+            Use only every n_skip_pred-th saved draw of each chain (see predict_summary).
 
         Returns
         -------
-        ndarray of shape (num_chains * n_save, m)
+        ndarray of shape (num_chains * ceil(n_save / n_skip_pred), m)
             One row per posterior draw (chain 0's draws first), one column per row of X.
             Memory is draws x m floats; split very large X into batches.
         """
         bartz_kind = {"mean": "mean_samples", "predictive": "outcome_samples"}[kind]
-        draws = self._draws(X, bartz_kind, seed)
+        draws = self._bartz_predict(X, bartz_kind, n_skip_pred, seed)
         return draws.reshape(-1, draws.shape[-1])
 
-    def predict_dist(self, X: ArrayLike, batch_size: int = 2000) -> pd.DataFrame:
-        """Posterior mean and uncertainty for every row of X.
+    def predict_summary(
+        self,
+        X: ArrayLike,
+        prob: float = 0.95,
+        n_skip_pred: int = 1,
+        batch_size: int = 2000,
+    ) -> pd.DataFrame:
+        """Posterior mean, uncertainty and HPDI of f(x) for every row of X, in one pass.
+
+        Every prediction method evaluates all trees of all kept draws, which is the slow
+        part of BART; this gets all the usual numbers from a single evaluation.
 
         Parameters
         ----------
         X : DataFrame or array of shape (m, p)
             Same columns as in fit.
+        prob : float, default 0.95
+            Probability inside the HPDI.
+        n_skip_pred : int, default 1
+            Use only every n_skip_pred-th saved draw of each chain: about n_skip_pred times
+            faster. MCMC draws are strongly autocorrelated (the bulk ESS in diagnostics() is
+            usually far below the number of draws), so a few hundred draws in total give
+            nearly the same numbers. Unlike n_skip, it does not change the fitted model.
         batch_size : int, default 2000
             Rows processed at a time; memory is about n_draws x batch_size floats. Results
             do not depend on it.
@@ -424,10 +485,15 @@ class _BartBase(KwargsEstimator):
         Returns
         -------
         DataFrame with one row per row of X (same index for a DataFrame) and columns:
-            mean           posterior mean of f(x) (of p(x) for the classifier)
-            sd             posterior sd of f(x): uncertainty about the mean
-            predictive_sd  sd of a new observation y at x: sqrt(sd^2 + E[sigma^2]) (law of
-                           total variance); for the classifier sqrt(p (1 - p)) of the 0/1 y
+            mean                posterior mean of f(x) (of p(x) for the classifier); the
+                                same as predict (predict_proba[:, 1])
+            sd                  posterior sd of f(x): uncertainty about the mean
+            predictive_sd       sd of a new observation y at x: sqrt(sd^2 + E[sigma^2]) (law
+                                of total variance); for the classifier sqrt(p (1 - p)) of
+                                the 0/1 y
+            hpdi_<prob>_low,    highest posterior density interval of f(x) (of p(x) for the
+            hpdi_<prob>_high    classifier); for an interval for a new y, use
+                                predict_interval(kind="predictive")
 
         Notes
         -----
@@ -436,13 +502,16 @@ class _BartBase(KwargsEstimator):
         """
         parts = []
         for chunk in _row_chunks(X, batch_size):
-            mean_draws = self.predict_samples(chunk, kind="mean")
+            mean_draws = self.predict_samples(chunk, kind="mean", n_skip_pred=n_skip_pred)
+            lower, upper = hpdi(mean_draws, prob, axis=0)
             parts.append(
                 pd.DataFrame(
                     {
                         "mean": mean_draws.mean(axis=0),
                         "sd": mean_draws.std(axis=0, ddof=1),
-                        "predictive_sd": np.sqrt(self._predictive_var(mean_draws)),
+                        "predictive_sd": np.sqrt(self._predictive_var(mean_draws, n_skip_pred)),
+                        f"hpdi_{prob:g}_low": lower,
+                        f"hpdi_{prob:g}_high": upper,
                     }
                 )
             )
@@ -457,6 +526,7 @@ class _BartBase(KwargsEstimator):
         prob: float = 0.95,
         kind: Literal["mean", "predictive"] = "mean",
         method: Literal["hpdi", "quantile"] = "hpdi",
+        n_skip_pred: int = 1,
         batch_size: int = 2000,
     ) -> pd.DataFrame:
         """Interval holding `prob` of the posterior draws, for every row of X.
@@ -475,6 +545,9 @@ class _BartBase(KwargsEstimator):
         method : {"hpdi", "quantile"}, default "hpdi"
             "hpdi": highest posterior density interval (the narrowest one). "quantile":
             equal-tailed interval between the (1 - prob)/2 and (1 + prob)/2 quantiles.
+        n_skip_pred : int, default 1
+            Use only every n_skip_pred-th saved draw of each chain: about n_skip_pred times
+            faster (see predict_summary).
         batch_size : int, default 2000
             Rows processed at a time; memory is about n_draws x batch_size floats. Results
             do not depend on it.
@@ -492,7 +565,8 @@ class _BartBase(KwargsEstimator):
         interval = {"hpdi": hpdi, "quantile": quantile_interval}[method]
         parts = []
         for chunk in _row_chunks(X, batch_size):
-            lower, upper = interval(self.predict_samples(chunk, kind=kind), prob, axis=0)
+            draws = self.predict_samples(chunk, kind=kind, n_skip_pred=n_skip_pred)
+            lower, upper = interval(draws, prob, axis=0)
             parts.append(pd.DataFrame({"lower": lower, "upper": upper}))
         result = pd.concat(parts, ignore_index=True)
         if isinstance(X, pd.DataFrame):
@@ -623,7 +697,7 @@ class _BartBase(KwargsEstimator):
             Separately, when leaf_fill > leaf_fill_max.
         """
         X_check = self.X_probe_ if X_probe is None else X_probe
-        mean_draws = self._draws(X_check, "mean_samples")
+        mean_draws = self._bartz_predict(X_check, "mean_samples")
         f_draws = {f"f(x_probe[{i}])": mean_draws[..., i] for i in range(mean_draws.shape[-1])}
         thresholds = {"prob": prob, "rhat_max": rhat_max, "ess_min": ess_min}
         parameters = summarize_draws(self.parameter_draws(), **thresholds)
@@ -724,7 +798,7 @@ class _BartBase(KwargsEstimator):
         reaches the trees, so `missing` is None: a missing direction would mean nothing.
         """
         check_is_fitted(self, "bart_")
-        X_model = None if X is None else self._model_X(self._check_X(X))
+        X_model = None if X is None else self._model_X(X)
         # `trees` (the argument) hides the trees module here, hence the _trees_table alias
         table = _trees_table(self.bart_, self.model_feature_names_, chains, draws, trees, X_model)
         if self.imputer_ is not None:  # NaN were imputed: no missing direction to report
@@ -754,7 +828,7 @@ class _BartBase(KwargsEstimator):
         See importance.variable_importance for the definitions.
         """
         check_is_fitted(self, "bart_")
-        X_model = None if X is None else self._model_X(self._check_X(X))
+        X_model = None if X is None else self._model_X(X)
         return importance.variable_importance(
             self.bart_, self.model_feature_names_, X_model, prob, max_draws
         )
@@ -868,33 +942,38 @@ class BartRegressor(RegressorMixin, _BartBase):
         """y as float32."""
         return np.asarray(y, dtype=np.float32)
 
-    def _sigma_draws(self) -> np.ndarray:
-        """Noise sd draws, shaped (chain, draw)."""
+    def _sigma_draws(self, n_skip_pred: int = 1) -> np.ndarray:
+        """Noise sd draws, shaped (chain, draw); every n_skip_pred-th draw of each chain."""
         sdev = np.asarray(self.bart_.get_error_sdev())
-        return sdev.reshape(self.num_chains, self.bart_.n_save)
+        return sdev.reshape(self.num_chains, self.bart_.n_save)[:, ::n_skip_pred]
 
     def _parameter_draws(self) -> dict[str, np.ndarray]:
         """The regressor's own parameter: sigma."""
         return {"sigma": self._sigma_draws()}
 
-    def _predictive_var(self, mean_draws: np.ndarray) -> np.ndarray:
+    def _predictive_var(self, mean_draws: np.ndarray, n_skip_pred: int = 1) -> np.ndarray:
         """Var[y_new] = Var[f(x)] + E[sigma^2], from draws of f(x) shaped (draws, m)."""
-        return mean_draws.var(axis=0, ddof=1) + np.mean(self._sigma_draws() ** 2)
+        sigma2 = np.mean(self._sigma_draws(n_skip_pred) ** 2)
+        return mean_draws.var(axis=0, ddof=1) + sigma2
 
-    def predict(self, X: ArrayLike) -> np.ndarray:
+    def predict(self, X: ArrayLike, n_skip_pred: int = 1) -> np.ndarray:
         """Posterior mean of f(x) for every row of X.
 
         Parameters
         ----------
         X : DataFrame or array of shape (m, p)
             Same columns as in fit.
+        n_skip_pred : int, default 1
+            Use only every n_skip_pred-th saved draw of each chain: about n_skip_pred times
+            faster (see predict_summary).
 
         Returns
         -------
         ndarray of shape (m,)
+            For the sd and HPDI as well, from the same single evaluation, use
+            predict_summary.
         """
-        X_model = self._model_X(self._check_X(X))  # checks it is fitted first
-        return np.asarray(self.bart_.predict(X_model.T, kind="mean"))
+        return self._bartz_predict(X, "mean", n_skip_pred)
 
 
 class BartClassifier(ClassifierMixin, _BartBase):
@@ -920,42 +999,51 @@ class BartClassifier(ClassifierMixin, _BartBase):
             raise ValueError(f"Only binary targets are supported, got {len(self.classes_)} classes")
         return y_encoded.astype(np.float32)
 
-    def _predictive_var(self, mean_draws: np.ndarray) -> np.ndarray:
+    def _predictive_var(self, mean_draws: np.ndarray, n_skip_pred: int = 1) -> np.ndarray:
         """Var of a new 0/1 outcome, p (1 - p) with p the posterior mean probability."""
         p = mean_draws.mean(axis=0)
         return p * (1 - p)
 
-    def predict_proba(self, X: ArrayLike) -> np.ndarray:
+    def predict_proba(self, X: ArrayLike, n_skip_pred: int = 1) -> np.ndarray:
         """Posterior mean probability of each class for every row of X.
 
         Parameters
         ----------
         X : DataFrame or array of shape (m, p)
             Same columns as in fit.
+        n_skip_pred : int, default 1
+            Use only every n_skip_pred-th saved draw of each chain: about n_skip_pred times
+            faster (see predict_summary).
 
         Returns
         -------
         ndarray of shape (m, 2)
             Columns P(classes_[0]) and P(classes_[1]); the second is the posterior mean
-            of p(x) = Phi(f(x)).
+            of p(x) = Phi(f(x)). For its sd and HPDI as well, from the same single
+            evaluation, use predict_summary.
         """
-        X_model = self._model_X(self._check_X(X))  # checks it is fitted first
-        p = np.asarray(self.bart_.predict(X_model.T, kind="mean"))
+        p = self._bartz_predict(X, "mean", n_skip_pred)
         return np.column_stack([1 - p, p])
 
-    def predict(self, X: ArrayLike) -> np.ndarray:
+    def predict(self, X: ArrayLike, n_skip_pred: int = 1) -> np.ndarray:
         """Predicted class for every row of X: classes_[1] where P >= 0.5.
+
+        Kept for scikit-learn (score, cross_val_score, ...); predict_proba or
+        predict_summary give the probabilities.
 
         Parameters
         ----------
         X : DataFrame or array of shape (m, p)
             Same columns as in fit.
+        n_skip_pred : int, default 1
+            Use only every n_skip_pred-th saved draw of each chain (see predict_summary).
 
         Returns
         -------
         ndarray of shape (m,) with values from classes_.
         """
-        return self.classes_[(self.predict_proba(X)[:, 1] >= 0.5).astype(int)]
+        proba = self.predict_proba(X, n_skip_pred)[:, 1]
+        return self.classes_[(proba >= 0.5).astype(int)]
 
     def predict_interval(
         self,
@@ -963,6 +1051,7 @@ class BartClassifier(ClassifierMixin, _BartBase):
         prob: float = 0.95,
         kind: Literal["mean", "predictive"] = "mean",
         method: Literal["hpdi", "quantile"] = "hpdi",
+        n_skip_pred: int = 1,
         batch_size: int = 2000,
     ) -> pd.DataFrame:
         """Credible interval of p(x) = P(y = 1 | x) for every row of X.
@@ -980,6 +1069,8 @@ class BartClassifier(ClassifierMixin, _BartBase):
             Anything else raises a ValueError.
         method : {"hpdi", "quantile"}, default "hpdi"
             Narrowest interval, or equal-tailed quantiles.
+        n_skip_pred : int, default 1
+            Use only every n_skip_pred-th saved draw of each chain (see predict_summary).
         batch_size : int, default 2000
             Rows processed at a time, to bound memory.
 
@@ -990,5 +1081,5 @@ class BartClassifier(ClassifierMixin, _BartBase):
         if kind != "mean":
             raise ValueError("BartClassifier only supports kind='mean' (an interval for p(x))")
         return super().predict_interval(
-            X, prob=prob, kind=kind, method=method, batch_size=batch_size
+            X, prob=prob, kind=kind, method=method, n_skip_pred=n_skip_pred, batch_size=batch_size
         )
