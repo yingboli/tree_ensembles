@@ -208,7 +208,9 @@ training rows (the row count only for squared error without weights).
 `bart.parameter_draws()` returns the raw (chain, draw) draws behind `posterior_summary()`.
 A full walk-through on two TabReD datasets is in `notebooks/bart_demo.ipynb`.
 Plots: `from tree_ensembles.bart.plots import plot_trace, plot_rank, plot_tree_sizes,
-plot_variable_usage`.
+plot_feature_importance`
+(`plot_feature_importance(forest, prob=0.95)` adds HPDI error bars;
+`plot_tree_sizes(forest, show_prior=True)` adds the tree prior's distributions).
 
 - **Convergence:** `diagnostics()` warns when R-hat > 1.01 or ESS < 400 (Vehtari et al. 2021).
   Use several chains (default 4); in BART, sigma and the tree sizes often mix slowly, so check

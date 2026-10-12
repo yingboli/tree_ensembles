@@ -1,6 +1,7 @@
 """Insights into the fitted BART trees: depth, leaves, splits, variable usage.
 
-This is the only module that reads bartz internals (`Bart._main_trace`, `Bart._binner`),
+This module reads bartz internals (`Bart._main_trace`, `Bart._binner`, the prior's split
+probabilities in `Bart._mcmc_state`),
 which is why bartz is pinned to a minor version. How bartz stores a tree:
 
 - Each tree is a heap of nodes numbered from 1 (the root); node i has children 2i and 2i + 1.
@@ -26,6 +27,8 @@ import jax.numpy as jnp
 import numpy as np
 import pandas as pd
 from bartz import Bart
+
+from tree_ensembles.bart.intervals import hpdi
 
 
 @dataclass
@@ -135,6 +138,21 @@ class ForestSummary:
     n_splits: np.ndarray
     split_counts: np.ndarray  # (chain, draw, feature): number of decision nodes using it
     feature_names: list[str]
+    # prior probability that a node at each depth splits (0 = root; 0 at the last level)
+    split_prob: np.ndarray | None = None
+
+    def prior_distributions(self) -> tuple[pd.Series, pd.Series]:
+        """Share of trees by depth and by number of leaves under the tree prior.
+
+        Returns
+        -------
+        (depth, leaves) : tuple of Series
+            Like depth_distribution() and leaves_distribution(), but before seeing data;
+            see prior_tree_sizes.
+        """
+        if self.split_prob is None:
+            raise ValueError("This ForestSummary has no split_prob (the prior's settings)")
+        return prior_tree_sizes(self.split_prob)
 
     def tree_sizes(self) -> pd.DataFrame:
         """Average tree size in every draw.
@@ -189,21 +207,79 @@ class ForestSummary:
         """
         return pd.Series(self.n_leaves.ravel()).value_counts(normalize=True).sort_index()
 
-    def variable_usage(self) -> pd.DataFrame:
+    def variable_usage(self, prob: float | None = None) -> pd.DataFrame:
         """How much each feature is used to split, most used first.
+
+        Parameters
+        ----------
+        prob : float, optional
+            If given (e.g. 0.95), add the HPDI of the splits per draw, showing how much the
+            usage varies over the posterior.
 
         Returns
         -------
         DataFrame indexed by feature with columns mean_splits_per_draw (decision nodes on
         that feature, summed over the trees of a draw, averaged over draws) and
-        share_of_splits (summing to 1). A rough variable importance.
+        share_of_splits (summing to 1), plus hpdi_<prob>_low / hpdi_<prob>_high of the
+        splits per draw if `prob` is given. A rough variable importance; see
+        variable_importance on the model for more measures with uncertainty.
         """
-        per_draw = self.split_counts.reshape(-1, len(self.feature_names)).mean(axis=0)
-        usage = pd.DataFrame(
-            {"mean_splits_per_draw": per_draw, "share_of_splits": per_draw / per_draw.sum()},
-            index=pd.Index(self.feature_names, name="feature"),
-        )
+        counts = self.split_counts.reshape(-1, len(self.feature_names))  # (draw, feature)
+        per_draw = counts.mean(axis=0)
+        columns = {"mean_splits_per_draw": per_draw, "share_of_splits": per_draw / per_draw.sum()}
+        if prob is not None:
+            low, high = hpdi(counts, prob, axis=0)
+            columns |= {f"hpdi_{prob:g}_low": low, f"hpdi_{prob:g}_high": high}
+        usage = pd.DataFrame(columns, index=pd.Index(self.feature_names, name="feature"))
         return usage.sort_values("mean_splits_per_draw", ascending=False)
+
+
+def prior_tree_sizes(split_prob: np.ndarray | list[float]) -> tuple[pd.Series, pd.Series]:
+    """Exact distribution of tree depth and number of leaves under the BART tree prior.
+
+    Under the prior (Chipman, George and McCulloch 2010), a node at depth d (0 = root)
+    splits with probability split_prob[d], independently of the other nodes; bartz uses
+    split_prob[d] = base / (1 + d) ** power for d < maxdepth - 1, and nodes at the last
+    level never split.
+
+    Parameters
+    ----------
+    split_prob : array of shape (levels,)
+        Split probability at each depth; depths past the end never split. For the
+        estimators' settings: base / (1 + np.arange(maxdepth - 1)) ** power.
+
+    Returns
+    -------
+    (depth, leaves) : tuple of Series
+        Share of trees at each depth (levels of splits, 0 = single leaf) and with each
+        number of leaves, each summing to 1, indexed like depth_distribution() and
+        leaves_distribution().
+
+    Notes
+    -----
+    Computed exactly from the bottom level up. With L the leaves and H the depth of the
+    subtree below a node at depth d, which splits with probability q = split_prob[d]:
+
+        L_d = 1 with probability 1 - q, else the sum of two independent copies of L_{d+1};
+        P(H_d <= h) = (1 - q) + q * P(H_{d+1} <= h - 1) ** 2   (and 1 - q for h = 0).
+
+    bartz also refuses a split when no feature has a cutpoint left for the node; with many
+    features and cutpoints this almost never happens, so it is ignored here.
+    """
+    q = np.asarray(split_prob, dtype=float)
+    levels = len(q)
+    leaves = np.array([0.0, 1.0])  # below the last level: a single leaf
+    height_cdf = np.ones(levels + 1)  # P(H <= h), h = 0..levels; a leaf has H = 0
+    for qd in q[::-1]:  # bottom level first
+        split = np.convolve(leaves, leaves)  # two independent subtrees
+        new_leaves = qd * split
+        new_leaves[1] += 1 - qd
+        leaves = new_leaves
+        height_cdf = (1 - qd) + qd * np.concatenate([[0.0], height_cdf[:-1] ** 2])
+    depth = np.diff(np.concatenate([[0.0], height_cdf]))
+    depth_series = pd.Series(depth, index=pd.RangeIndex(levels + 1))
+    leaves_series = pd.Series(leaves, index=pd.RangeIndex(len(leaves)))
+    return depth_series[depth_series > 0], leaves_series[leaves_series > 0]
 
 
 def forest_summary(bart: Bart, feature_names: list[str]) -> ForestSummary:
@@ -244,12 +320,16 @@ def forest_summary(bart: Bart, feature_names: list[str]) -> ForestSummary:
     )
     key = draw_id[internal] * p + trees.var[internal].astype(np.int64)
     split_counts = np.bincount(key, minlength=chains * draws * p).reshape(chains, draws, p)
+    # the prior's split probability per heap node; node 2**d is the first at depth d
+    by_node = np.asarray(bart._mcmc_state.forest.p_nonterminal)
+    split_prob = by_node[2 ** np.arange(int(np.log2(len(by_node))))]
     return ForestSummary(
         depth=depth,
         n_leaves=n_splits + 1,
         n_splits=n_splits,
         split_counts=split_counts,
         feature_names=feature_names,
+        split_prob=split_prob,
     )
 
 

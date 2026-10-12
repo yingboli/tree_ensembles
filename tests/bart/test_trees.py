@@ -3,7 +3,13 @@ import pandas as pd
 import pytest
 
 from tree_ensembles.bart import BartRegressor
-from tree_ensembles.bart.trees import internal_nodes, node_depths, predict_one_draw, tree_arrays
+from tree_ensembles.bart.trees import (
+    internal_nodes,
+    node_depths,
+    predict_one_draw,
+    prior_tree_sizes,
+    tree_arrays,
+)
 
 
 def test_internal_nodes_ignore_unreachable_slots() -> None:
@@ -57,6 +63,12 @@ def test_forest_summary(fitted_regressor: BartRegressor) -> None:
 
     usage = fs.variable_usage()
     assert usage.index[-1] == "c"  # the noise feature is used least
+    with_hpdi = fs.variable_usage(prob=0.9)
+    pd.testing.assert_frame_equal(with_hpdi[usage.columns], usage)
+    assert (with_hpdi["hpdi_0.9_low"] <= with_hpdi["hpdi_0.9_high"]).all()
+    counts = pd.DataFrame(fs.split_counts.reshape(-1, 3), columns=fs.feature_names)
+    assert (with_hpdi["hpdi_0.9_low"] >= counts.min()[with_hpdi.index]).all()
+    assert (with_hpdi["hpdi_0.9_high"] <= counts.max()[with_hpdi.index]).all()
     assert usage["share_of_splits"].sum() == 1.0 or np.isclose(usage["share_of_splits"].sum(), 1)
     assert np.isclose(fs.depth_distribution().sum(), 1)
     assert isinstance(fs.tree_sizes(), pd.DataFrame) and len(fs.tree_sizes()) == 600
@@ -158,3 +170,38 @@ def test_trees_to_dataframe_columns_and_num_rows(
         assert tree.loc[tree["is_leaf"], "num_rows"].sum() == 100  # and exactly one leaf
         for row in tree[~tree["is_leaf"]].itertuples():
             assert rows[row.left] + rows[row.right] == rows[row.node]
+
+
+def test_prior_tree_sizes() -> None:
+    # depth 0 or 1 only: the root splits with probability 0.3, its children never
+    depth, leaves = prior_tree_sizes([0.3])
+    np.testing.assert_allclose(depth.to_numpy(), [0.7, 0.3])
+    np.testing.assert_allclose(leaves.loc[[1, 2]].to_numpy(), [0.7, 0.3])
+
+    # two levels by hand: 3 leaves needs a root split and exactly one child split
+    q0, q1 = 0.9, 0.4
+    depth, leaves = prior_tree_sizes([q0, q1])
+    assert leaves[3] == pytest.approx(q0 * 2 * q1 * (1 - q1))
+    assert depth[2] == pytest.approx(q0 * (1 - (1 - q1) ** 2))
+
+    # the defaults (maxdepth=6, base=0.95, power=2): about 2.5 leaves, at most 32
+    q = 0.95 / (1 + np.arange(5)) ** 2.0
+    depth, leaves = prior_tree_sizes(q)
+    assert depth.sum() == pytest.approx(1) and leaves.sum() == pytest.approx(1)
+    assert (leaves.index * leaves).sum() == pytest.approx(2.5087, abs=1e-4)
+    assert leaves.index.max() == 32 and depth.index.max() == 5
+
+
+def test_forest_summary_reads_the_prior(fitted_regressor: BartRegressor) -> None:
+    fs = fitted_regressor.forest_summary()
+    base, power, maxdepth = (
+        fitted_regressor.base,
+        fitted_regressor.power,
+        fitted_regressor.maxdepth,
+    )
+    expected = base / (1 + np.arange(maxdepth - 1)) ** power
+    assert fs.split_prob is not None
+    np.testing.assert_allclose(fs.split_prob[: maxdepth - 1], expected, rtol=1e-6)
+    assert (fs.split_prob[maxdepth - 1 :] == 0).all()  # the last level never splits
+    depth, leaves = fs.prior_distributions()
+    assert depth.index.max() <= maxdepth - 1

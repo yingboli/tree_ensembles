@@ -5,10 +5,10 @@ matplotlib.use("Agg")  # no display needed
 
 from tree_ensembles.bart import BartRegressor  # noqa: E402
 from tree_ensembles.bart.plots import (  # noqa: E402
+    plot_feature_importance,
     plot_rank,
     plot_trace,
     plot_tree_sizes,
-    plot_variable_usage,
 )
 
 
@@ -21,7 +21,13 @@ def test_draw_plots() -> None:
 def test_forest_plots(fitted_regressor: BartRegressor) -> None:
     summary = fitted_regressor.forest_summary()
     assert len(plot_tree_sizes(summary).axes) == 2
-    assert len(plot_variable_usage(summary, top=2).axes) == 1
+    with_prior = plot_tree_sizes(summary, show_prior=True)
+    assert all(len(ax.containers) == 2 for ax in with_prior.axes)  # posterior and prior bars
+    plain = plot_feature_importance(summary, top=2)
+    assert len(plain.axes) == 1 and not plain.axes[0].collections  # no error bars
+    with_hpdi = plot_feature_importance(summary, top=2, prob=0.9)
+    assert len(with_hpdi.axes[0].collections) == 1  # the HPDI error bars
+    assert with_hpdi.axes[0].get_title() == "Feature importance"
 
 
 def test_plot_bart_trees(fitted_regressor: BartRegressor) -> None:

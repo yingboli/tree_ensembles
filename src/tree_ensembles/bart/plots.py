@@ -83,13 +83,19 @@ def plot_rank(draws: np.ndarray, name: str = "", bins: int = 20) -> "Figure":
     return fig
 
 
-def plot_tree_sizes(summary: ForestSummary) -> "Figure":
+def plot_tree_sizes(summary: ForestSummary, show_prior: bool = False) -> "Figure":
     """Share of trees by depth (left) and by number of leaves (right), over all draws.
 
     Parameters
     ----------
     summary : ForestSummary
         From model.forest_summary().
+    show_prior : bool, default False
+        Also show the same shares under the tree prior (before seeing data; see
+        trees.prior_tree_sizes), as bars next to the posterior ones; prior shares below
+        0.1% are left out so the axis only covers visible bars. Posterior trees
+        larger than the prior's mean the data ask for more structure per tree; more trees
+        (num_trees) can share it.
 
     Returns
     -------
@@ -107,19 +113,29 @@ def plot_tree_sizes(summary: ForestSummary) -> "Figure":
     (bartz maxdepth = XGBoost max_depth + 1).
     """
     fig, (depth, leaves) = _subplots(2)
-    d, n = summary.depth_distribution(), summary.leaves_distribution()
-    depth.bar(d.index, d.to_numpy())
+    posterior = (summary.depth_distribution(), summary.leaves_distribution())
+    prior = None
+    if show_prior:  # the prior is positive up to the largest tree; drop the invisible tail
+        prior = tuple(s[s >= 1e-3] for s in summary.prior_distributions())
+    for i, ax in enumerate((depth, leaves)):
+        if prior is None:
+            ax.bar(posterior[i].index, posterior[i].to_numpy())
+            continue
+        ax.bar(posterior[i].index - 0.2, posterior[i].to_numpy(), width=0.4, label="posterior")
+        ax.bar(prior[i].index + 0.2, prior[i].to_numpy(), width=0.4, label="prior", color="0.6")
+        ax.legend()
     depth.set(
         title="Tree depth", xlabel="depth (0 = single leaf, 1 = one split)", ylabel="share of trees"
     )
-    leaves.bar(n.index, n.to_numpy())
     leaves.set(title="Leaves per tree", xlabel="number of leaves")
     fig.tight_layout()
     return fig
 
 
-def plot_variable_usage(summary: ForestSummary, top: int = 20) -> "Figure":
-    """Mean number of splits per draw for the `top` most used features.
+def plot_feature_importance(
+    summary: ForestSummary, top: int = 20, prob: float | None = None
+) -> "Figure":
+    """Feature importance as the mean number of splits per draw, for the `top` features.
 
     Parameters
     ----------
@@ -127,6 +143,9 @@ def plot_variable_usage(summary: ForestSummary, top: int = 20) -> "Figure":
         From model.forest_summary().
     top : int, default 20
         Number of features to show, most used at the top.
+    prob : float, optional
+        If given (e.g. 0.95), add error bars for the HPDI of the splits per draw
+        (ForestSummary.variable_usage(prob)): how much the usage varies over the posterior.
 
     Returns
     -------
@@ -135,9 +154,17 @@ def plot_variable_usage(summary: ForestSummary, top: int = 20) -> "Figure":
         figure is shown once: otherwise it is drawn both by matplotlib and as the cell's
         returned value. Keep the Figure to save it, e.g. fig.savefig("trees.pdf").
     """
-    usage = summary.variable_usage().head(top).iloc[::-1]  # most used at the top
+    usage = summary.variable_usage(prob).head(top).iloc[::-1]  # most used at the top
+    mean = usage["mean_splits_per_draw"].to_numpy()
+    xerr, xlabel = None, "mean splits per posterior draw"
+    if prob is not None:
+        low = usage[f"hpdi_{prob:g}_low"].to_numpy()
+        high = usage[f"hpdi_{prob:g}_high"].to_numpy()
+        # counts are whole numbers, so the mean can fall just outside a narrow HPDI
+        xerr = np.clip([mean - low, high - mean], 0, None)
+        xlabel += f" ({prob:.0%} HPDI)"
     fig, (ax,) = _subplots(1, width=6, height=0.3 * len(usage) + 1)
-    ax.barh(usage.index, usage["mean_splits_per_draw"])
-    ax.set(title="Variable usage", xlabel="mean splits per posterior draw")
+    ax.barh(usage.index, mean, xerr=xerr, ecolor="0.3", capsize=2)
+    ax.set(title="Feature importance", xlabel=xlabel)
     fig.tight_layout()
     return fig

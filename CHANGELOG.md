@@ -42,12 +42,19 @@ All notable changes to this project. Format based on
 - `tree_ensembles.tree_plot`: `plot_tree` and `plot_trees` draw BART or XGBoost trees from
   that table (splits, leaf values, node sizes; `max_depth` to cut deep trees).
 - `CLAUDE.md` with project conventions.
+- BART `plot_tree_sizes(forest, show_prior=True)` shows the tree prior's depth and leaves
+  distributions next to the posterior ones, computed exactly from the model's split
+  probabilities (`trees.prior_tree_sizes`, `ForestSummary.prior_distributions()`).
 - XGBoost `dump(folder)` / `load(folder)` for `XGBDefaultClassifier` / `XGBDefaultRegressor`,
   like BART's: the trees in XGBoost's own format (`model.ubj`, readable by later XGBoost
   versions, keeps `category` levels) and the rest of the estimator in `estimator.pkl`.
 
 ### Changed
 
+- BART: `plot_variable_usage` is renamed `plot_feature_importance` (title "Feature importance")
+  and takes `prob` (e.g. 0.95) to add HPDI error bars; `ForestSummary.variable_usage(prob)`
+  adds the matching `hpdi_<prob>_low` / `_high` columns. Breaking: update imports of
+  `plot_variable_usage`.
 - BART `diagnostics()` reports the average acceptance rate as a single row (mean only) and no
   longer checks it for convergence, so it no longer adds to the convergence warning.
 - BART `diagnostics()` summarizes f(x) at the probe rows in two rows (median and worst R-hat /
